@@ -9,9 +9,10 @@ Codex + SKILL.md
   -> Python workflow engine
        -> content-based input classification
        -> Evidence Resolution Layer
-            -> deterministic identity
+            -> unified product identity
             -> structural attribution
-            -> semantic/context candidates
+            -> bounded semantic/context candidates
+            -> global cross-file cent constraints
             -> contradiction/reconciliation checks
        -> Decimal accounting and reconciliation
        -> workspace Local Memory / Human Gates / run state
@@ -43,7 +44,7 @@ The worker locates report and support structures from semantic headers, formulas
 
 ## Evidence resolution boundary
 
-Unknown detection is not a permission boundary. The resolver first attempts exact identity and template relationships, then bounded semantic/context reasoning against current runtime candidates. It produces evidence-bearing `VERIFIED`, `MACHINE_INFERRED`, or `HUMAN_REQUIRED` decisions. Only the last class becomes a Human Gate. Machine decisions are never durable Local Memory.
+Unknown detection is not a permission boundary. The resolver first attempts exact identity and template relationships, then bounded semantic/context reasoning against current runtime candidates, then unique cross-file ledger constraints where necessary. Product identity unifies SKU and other stable platform product identifiers. It produces evidence-bearing `VERIFIED`, `MACHINE_INFERRED`, or `HUMAN_REQUIRED` decisions. Only the last class becomes a Human Gate. Machine decisions are never durable Local Memory.
 
 ## Technology choice
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0-rc.3 — 2026-08-20
+
+- Added unique global cent-constraint resolution across current-run campaign files and ledger store totals.
+- Unified SKU, product ID, placement ID, and platform item ID lookup through a product-identity index.
+- Bounded semantic candidate generation to the strongest available current-run source scope and exposed candidate evidence, scope, and reason.
+- Preserved ambiguous, conflicting, weak, or unreconciled cases as Human Gates.
+
 ## 0.1.0-rc.2 — 2026-08-20
 
 - Added Evidence Resolution Layer v1 between unknown detection and Human Gate creation.

@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/daily-roi/evidence-resolution.schema.json",
-  "title": "Daily ROI Evidence Resolution v1",
+  "title": "Daily ROI Evidence Resolution v1.1",
   "type": "object",
   "additionalProperties": true,
-  "required": ["schema_version", "entity_type", "source", "sources", "fact_family", "candidate", "decision", "evidence", "contradictions", "alternatives", "reconciliation"],
+  "required": ["schema_version", "entity_type", "source", "sources", "fact_family", "candidate", "decision", "evidence", "contradictions", "alternatives", "candidate_generation", "reconciliation"],
   "properties": {
     "schema_version": { "const": 1 },
     "entity_type": { "enum": ["store", "product", "campaign", "sku"] },
@@ -16,10 +16,23 @@
     "evidence": { "type": "array", "items": { "type": "object" } },
     "contradictions": { "type": "array", "items": { "type": "object" } },
     "alternatives": { "type": "array", "items": { "type": "string" } },
+    "candidate_generation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["candidate", "evidence", "source_scope", "reason"],
+        "properties": {
+          "candidate": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "object" } },
+          "source_scope": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
     "reconciliation": {
       "type": "object",
       "required": ["status"],
-      "properties": { "status": { "enum": ["PASS", "FAIL", "NOT_TESTED"] } }
+      "properties": { "status": { "enum": ["PASS", "FAIL", "AMBIGUOUS", "NOT_TESTED"] } }
     }
   }
 }

@@ -105,6 +105,8 @@ def semantic_evidence(source: str, candidate: str) -> list[dict[str, Any]]:
         differences = sum(left != right for left, right in zip(source_root, candidate_root))
         if differences == 1:
             evidence.append(_evidence("single_character_root_variant", source_root=source_root, candidate_root=candidate_root))
+        if len(source_root) >= 2 and source_root != candidate_root and sorted(source_root) == sorted(candidate_root):
+            evidence.append(_evidence("transposed_root_variant", source_root=source_root, candidate_root=candidate_root))
     anchor = _longest_common_substring(source_root, candidate_root)
     if len(anchor) >= 2 and source_root != candidate_root:
         evidence.append(_evidence("shared_semantic_anchor", anchor=anchor))
@@ -158,6 +160,8 @@ def resolve_entity(
     entity_type: str,
     exact_matches: Iterable[tuple[str, str, dict[str, Any] | None]] = (),
     context_candidates: Iterable[str] | None = None,
+    semantic_candidates: Iterable[str] | None = None,
+    source_scope: str | None = None,
     sibling_sources: Iterable[str] = (),
     cross_file_targets: Iterable[str] = (),
     reconciliation: dict[str, Any] | None = None,
@@ -190,13 +194,21 @@ def resolve_entity(
         "contradictions": contradictions,
         "alternatives": [],
         "reconciliation": reconciliation or {"status": "NOT_TESTED"},
+        "candidate_generation": [],
     }
     if len(exact) == 1 and not contradictions:
         candidate = next(iter(exact))
+        exact_evidence = _dedupe_evidence([*exact[candidate], _evidence("unique_exact_target")])
         base.update(
             candidate=candidate,
             decision=VERIFIED,
-            evidence=_dedupe_evidence([*exact[candidate], _evidence("unique_exact_target")]),
+            evidence=exact_evidence,
+            candidate_generation=[{
+                "candidate": candidate,
+                "evidence": exact_evidence,
+                "source_scope": "deterministic_identity",
+                "reason": "unique_exact_target_without_contradiction",
+            }],
         )
         return base
     if len(exact) > 1:
@@ -204,7 +216,18 @@ def resolve_entity(
         base["alternatives"] = sorted(exact)
         return base
 
-    search_candidates = [item for item in all_candidates if not context_supplied or normalize_entity(item) in context_keys]
+    semantic_supplied = semantic_candidates is not None
+    semantic_scope = _unique(semantic_candidates or [])
+    semantic_keys = {normalize_entity(item) for item in semantic_scope}
+    if context_supplied:
+        search_candidates = [item for item in all_candidates if normalize_entity(item) in context_keys]
+        resolved_scope = source_scope or "current_store_products"
+    elif semantic_supplied:
+        search_candidates = [item for item in all_candidates if normalize_entity(item) in semantic_keys]
+        resolved_scope = source_scope or "explicit_bounded_scope"
+    else:
+        search_candidates = list(all_candidates)
+        resolved_scope = source_scope or "current_template_products"
     semantic: dict[str, list[dict[str, Any]]] = {}
     for candidate in search_candidates:
         evidence = semantic_evidence(source, candidate)
@@ -234,12 +257,25 @@ def resolve_entity(
             semantic[matching[0]].append(_evidence("unique_shared_token", token=token))
 
     plausible = sorted(semantic)
+    base["candidate_generation"] = [
+        {
+            "candidate": candidate,
+            "evidence": _dedupe_evidence(items),
+            "source_scope": resolved_scope,
+            "reason": "semantic_evidence_within_bounded_source_scope",
+        }
+        for candidate, items in sorted(semantic.items())
+    ]
     strong_candidates = []
     for candidate, items in semantic.items():
         types = {item["type"] for item in items}
         if types & {"product_form_root_exact", "normalized_containment", "unique_shared_token", "cross_file_identity_corroboration"}:
             strong_candidates.append(candidate)
-        elif {"single_character_root_variant", "same_product_form"} <= types or {"shared_semantic_anchor", "same_product_form"} <= types:
+        elif (
+            {"single_character_root_variant", "same_product_form"} <= types
+            or {"shared_semantic_anchor", "same_product_form"} <= types
+            or {"transposed_root_variant", "same_product_form"} <= types
+        ):
             strong_candidates.append(candidate)
     decision_candidates = sorted(strong_candidates) if strong_candidates else plausible
     base["alternatives"] = decision_candidates
@@ -271,7 +307,11 @@ def resolve_entity(
             "shared_distinct_token",
             "unique_shared_token",
         }
-    ) or ({"single_character_root_variant", "same_product_form"} <= types) or ({"shared_semantic_anchor", "same_product_form"} <= types)
+    ) or (
+        {"single_character_root_variant", "same_product_form"} <= types
+        or {"shared_semantic_anchor", "same_product_form"} <= types
+        or {"transposed_root_variant", "same_product_form"} <= types
+    )
     contextual_support = types & {
         "current_store_product_scope",
         "sibling_alias_family",
@@ -286,6 +326,133 @@ def resolve_entity(
         base.update(candidate=candidate, decision=MACHINE_INFERRED, evidence=_dedupe_evidence(evidence), alternatives=[])
     else:
         base.update(candidate=candidate, evidence=_dedupe_evidence(evidence), alternatives=[])
+    return base
+
+
+def resolve_global_store_constraints(
+    file_facts: Iterable[dict[str, Any]],
+    ledger_totals: dict[str, int],
+    assigned_totals: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Find a unique current-run file-to-store assignment from exact cent constraints."""
+    assigned = {store: int((assigned_totals or {}).get(store, 0)) for store in ledger_totals}
+    remaining = {store: int(total) - assigned.get(store, 0) for store, total in ledger_totals.items()}
+    facts = []
+    for raw in file_facts:
+        total = int(raw.get("total_cents", 0))
+        candidates = _unique(str(item) for item in raw.get("candidate_stores", []) if str(item) in ledger_totals)
+        if total > 0:
+            facts.append({**raw, "total_cents": total, "candidate_stores": candidates})
+
+    base = {
+        "status": HUMAN_REQUIRED,
+        "solutions_found": 0,
+        "assignments": {},
+        "decisions": {},
+        "reconciliation": {"status": "NOT_TESTED", "remaining_by_store_cents": remaining},
+    }
+    if (
+        not facts
+        or any(value < 0 for value in remaining.values())
+        or any(not item["candidate_stores"] for item in facts)
+        or any(not item.get("products") for item in facts)
+        or any(bool(item.get("has_conflict")) for item in facts)
+    ):
+        base["reconciliation"] = {
+            "status": "FAIL",
+            "reason": "missing_non_amount_constraint_or_conflicting_file_evidence",
+            "remaining_by_store_cents": remaining,
+        }
+        return base
+    if sum(item["total_cents"] for item in facts) != sum(remaining.values()):
+        base["reconciliation"] = {
+            "status": "FAIL",
+            "file_total_cents": sum(item["total_cents"] for item in facts),
+            "ledger_remaining_cents": sum(remaining.values()),
+        }
+        return base
+
+    ordered = sorted(facts, key=lambda item: (len(item["candidate_stores"]), -item["total_cents"], str(item["id"])))
+    solutions: list[dict[str, str]] = []
+    running = {store: 0 for store in ledger_totals}
+
+    def search(index: int, allocation: dict[str, str]) -> None:
+        if len(solutions) >= 2:
+            return
+        if index == len(ordered):
+            if all(running[store] == remaining[store] for store in remaining):
+                solutions.append(dict(allocation))
+            return
+        fact = ordered[index]
+        amount = fact["total_cents"]
+        for store in sorted(fact["candidate_stores"]):
+            if running[store] + amount > remaining[store]:
+                continue
+            running[store] += amount
+            allocation[str(fact["id"])] = store
+            search(index + 1, allocation)
+            allocation.pop(str(fact["id"]), None)
+            running[store] -= amount
+
+    search(0, {})
+    base["solutions_found"] = len(solutions)
+    if len(solutions) != 1:
+        base["reconciliation"] = {
+            "status": "AMBIGUOUS" if solutions else "FAIL",
+            "remaining_by_store_cents": remaining,
+            "solutions_found": len(solutions),
+        }
+        return base
+
+    allocation = solutions[0]
+    decisions: dict[str, dict[str, Any]] = {}
+    by_id = {str(item["id"]): item for item in facts}
+    for fact_id, store in allocation.items():
+        fact = by_id[fact_id]
+        candidates = list(fact["candidate_stores"])
+        evidence = [
+            _evidence("global_constraint_unique_solution", solutions_found=1),
+            _evidence("current_file_amount_cents", amount=fact["total_cents"]),
+            _evidence("candidate_store_scope", stores=candidates, products=sorted(fact.get("products", []))),
+            _evidence(
+                "ledger_remainder_exact_across_current_files",
+                store=store,
+                ledger_total_cents=ledger_totals[store],
+                previously_assigned_cents=assigned.get(store, 0),
+            ),
+            _evidence("current_run_evidence_only", filename_history_used=False),
+        ]
+        decisions[fact_id] = {
+            "schema_version": 1,
+            "entity_type": "store",
+            "source": str(fact.get("source") or fact_id),
+            "sources": [str(fact.get("source") or fact_id)],
+            "fact_family": f"store-file:{fact_id}",
+            "candidate": store,
+            "decision": MACHINE_INFERRED,
+            "evidence": evidence,
+            "contradictions": [],
+            "alternatives": [],
+            "candidate_generation": [{
+                "candidate": candidate,
+                "evidence": [_evidence("candidate_store_scope")],
+                "source_scope": "current_template_store_product_structure",
+                "reason": "current_file_products_are_contained_by_store",
+            } for candidate in candidates],
+            "reconciliation": {
+                "status": "PASS",
+                "method": "unique_global_cent_constraint_solution",
+                "ledger_totals_cents": ledger_totals,
+                "assigned_totals_cents": assigned,
+                "current_run_assignments": allocation,
+            },
+        }
+    base.update(
+        status=MACHINE_INFERRED,
+        assignments=allocation,
+        decisions=decisions,
+        reconciliation={"status": "PASS", "remaining_by_store_cents": remaining},
+    )
     return base
 
 

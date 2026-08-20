@@ -5,7 +5,7 @@ description: Safely create and verify a daily ROI Excel report from a user-suppl
 
 # Daily ROI Report
 
-Use the deterministic runner as the accounting authority. An unknown value is input to Evidence Resolution, not an automatic Human Gate. Do not bypass the runner's unresolved decision or edit the workbook before preflight and reconciliation pass.
+Use the deterministic runner as the accounting authority. An unknown value is input to Evidence Resolution, not an automatic Human Gate. Resolution considers stable product identities, bounded runtime candidates, and unique cross-file accounting constraints before asking a person. Do not bypass the runner's unresolved decision or edit the workbook before preflight and reconciliation pass.
 
 ## Run
 
@@ -53,7 +53,7 @@ Use the deterministic runner as the accounting authority. An unknown value is in
 Read [references/workflow.md](references/workflow.md) for phase behavior. Read the focused references only when the phase requires them:
 
 - [references/memory-and-gates.md](references/memory-and-gates.md): unresolved facts, persistence, pause/resume.
-- [references/evidence-resolution.md](references/evidence-resolution.md): identity, structural, semantic/context resolution, contradiction checks, and question coalescing.
+- [references/evidence-resolution.md](references/evidence-resolution.md): product identity, structural and bounded semantic resolution, global constraints, contradiction checks, and question coalescing.
 - [references/dedup-and-reconciliation.md](references/dedup-and-reconciliation.md): identity evidence, expense/sales invariants.
 - [references/template-and-workbook.md](references/template-and-workbook.md): dynamic model, protected write, verification.
 

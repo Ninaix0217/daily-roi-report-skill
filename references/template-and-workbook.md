@@ -7,13 +7,13 @@ The workbook worker discovers at runtime:
 - sheet names and workbook order;
 - the report table from semantic headers;
 - product rows, total row, date cell, writable cost/sales/ROI cells, and existing formula precedent;
-- SKU-to-product relationships, SKU specification order, and conflicting duplicate SKU assignments;
+- SKU-to-product relationships, SKU specification order, other stable product-identity columns, and conflicting duplicate identity assignments;
 - store/product group structures on supporting sheets;
 - merged cells, widths, heights, and style/layout fingerprints.
 
 No sheet name, range, product count, SKU count, product order, or store set is a production constant.
 
-An exact SKU/item ID is `VERIFIED` only when the TemplateModel maps it to one product. The same identifier assigned to different template products is an explicit contradiction and requires resolution before writing.
+The Product Identity Resolver treats SKU, product ID, placement ID, and stable platform item ID as typed identities. An exact identity is `VERIFIED` only when the runtime identity index maps it to one template product. The index may use template columns or an exact same-row/cross-file identity bridge; semantic similarity never creates identity evidence. The same identifier assigned to different products is an explicit contradiction and requires resolution before writing.
 
 ## Protected write
 

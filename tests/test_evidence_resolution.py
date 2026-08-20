@@ -13,13 +13,15 @@ from daily_roi_lib import (  # noqa: E402
     LocalMemory,
     RuntimePaths,
     atomic_json,
+    build_product_identity_index,
     build_golden_payload,
     make_gate,
     norm,
     parse_campaign,
     resolve_gate,
+    resolve_product_evidence,
 )
-from evidence_resolution import HUMAN_REQUIRED, MACHINE_INFERRED, VERIFIED, resolve_entity  # noqa: E402
+from evidence_resolution import HUMAN_REQUIRED, MACHINE_INFERRED, VERIFIED, resolve_entity, resolve_global_store_constraints  # noqa: E402
 
 
 def template(products: list[str], *, store: str | None = None, skus: dict | None = None) -> dict:
@@ -119,8 +121,133 @@ class EvidenceDecisionTests(unittest.TestCase):
         self.assertIn("unique_shared_token", evidence_types)
         self.assertIn("weaker_semantic_candidates_rejected", evidence_types)
 
+    def test_candidate_generation_is_bounded_to_current_store_products(self):
+        decision = resolve_entity(
+            "清1",
+            ["清润液", "异物贴"],
+            entity_type="campaign",
+            context_candidates=["清润液"],
+            sibling_sources=["清1", "清3"],
+            reconciliation={"status": "PASS"},
+        )
+        generated = decision["candidate_generation"]
+        self.assertEqual([item["candidate"] for item in generated], ["清润液"])
+        self.assertEqual(generated[0]["source_scope"], "current_store_products")
+        self.assertTrue(generated[0]["evidence"])
+        self.assertTrue(generated[0]["reason"])
+        self.assertEqual(decision["decision"], MACHINE_INFERRED)
+
+    def test_ambiguous_semantics_with_two_bounded_candidates_requires_human(self):
+        decision = resolve_entity(
+            "暖舒贴",
+            ["暖适贴", "舒暖贴"],
+            entity_type="campaign",
+            context_candidates=["暖适贴", "舒暖贴"],
+        )
+        self.assertEqual(decision["decision"], HUMAN_REQUIRED)
+        self.assertEqual(set(decision["alternatives"]), {"暖适贴", "舒暖贴"})
+
 
 class EvidenceWorkflowTests(unittest.TestCase):
+    def test_global_constraint_resolves_two_files_to_same_store(self):
+        ambiguous = resolve_global_store_constraints(
+            [
+                {"id": "a", "source": "a.csv", "total_cents": 100, "candidate_stores": ["Store A", "Store B"], "products": ["Shared"]},
+                {"id": "b", "source": "b.csv", "total_cents": 100, "candidate_stores": ["Store A", "Store B"], "products": ["Shared"]},
+            ],
+            {"Store A": 100, "Store B": 100},
+        )
+        self.assertEqual(ambiguous["status"], HUMAN_REQUIRED)
+        self.assertEqual(ambiguous["solutions_found"], 2)
+        self.assertFalse(ambiguous["assignments"])
+        amount_only = resolve_global_store_constraints(
+            [{"id": "only", "source": "only.csv", "total_cents": 100, "candidate_stores": ["Store A"], "products": []}],
+            {"Store A": 100},
+        )
+        self.assertEqual(amount_only["status"], HUMAN_REQUIRED)
+        self.assertEqual(amount_only["reconciliation"]["reason"], "missing_non_amount_constraint_or_conflicting_file_evidence")
+        with tempfile.TemporaryDirectory() as root:
+            model = template(["Shared Product", "Beta Anchor"])
+            model["store_groups"] = [
+                {"store": "Store Alpha", "products": ["Shared Product"]},
+                {"store": "Store Beta", "products": ["Shared Product", "Beta Anchor"]},
+            ]
+            ledger = {
+                "source_name": "financial.xls",
+                "records": [
+                    {"row": 2, "transaction_id": "tx-a", "store": "Store Alpha", "date": "2026-08-20", "transaction_type": "快车扣费", "expense_cents": 42100},
+                    {"row": 3, "transaction_id": "tx-b", "store": "Store Beta", "date": "2026-08-20", "transaction_type": "快车扣费", "expense_cents": 80000},
+                ],
+            }
+            campaigns = [
+                regular([("Shared Product", 30125)], "shared-a.csv"),
+                regular([("Shared Product", 11975)], "shared-b.csv"),
+                regular([("Beta Anchor", 80000)], "beta.csv"),
+            ]
+            for marker, campaign in zip(("event-a", "event-b", "event-c"), campaigns):
+                campaign["records"][0]["record_id"] = marker
+            payload, audit, gates = build_golden_payload(
+                model,
+                ledger,
+                campaigns,
+                None,
+                LocalMemory(RuntimePaths.for_workspace(Path(root))),
+                {},
+                "2026-08-20",
+            )
+            self.assertFalse(gates)
+            self.assertEqual(payload["expense_total_cents"], 122100)
+            decisions = {
+                item["source"]: item
+                for item in audit["resolutions"]
+                if item.get("evidence") and any(e.get("type") == "global_constraint_unique_solution" for e in item["evidence"])
+            }
+            self.assertEqual(decisions["shared-a.csv"]["candidate"], "Store Alpha")
+            self.assertEqual(decisions["shared-b.csv"]["candidate"], "Store Alpha")
+            self.assertEqual(decisions["shared-a.csv"]["decision"], MACHINE_INFERRED)
+            self.assertEqual(decisions["shared-a.csv"]["reconciliation"]["status"], "PASS")
+
+    def test_product_identity_resolver_maps_non_sku_identity_without_gate(self):
+        with tempfile.TemporaryDirectory() as root:
+            model = template(["Product A"], store="Store-Product A", skus={})
+            model["identity"] = {
+                "map": {"product_id": {"SHARED-001": {"product": "Product A"}}},
+                "conflicts": [],
+            }
+            cross_namespace = resolve_product_evidence(
+                "SHARED-001",
+                model,
+                LocalMemory(RuntimePaths.for_workspace(Path(root))),
+                {},
+                identity_values={"placement_id": "SHARED-001"},
+                identity_index=build_product_identity_index(model),
+                semantic_products=[],
+            )
+            self.assertEqual(cross_namespace["decision"], HUMAN_REQUIRED)
+            model["identity"] = {
+                "map": {"placement_id": {"PID-001": {"product": "Product A"}}},
+                "conflicts": [],
+            }
+            identity_path = Path(root) / "identity.csv"
+            identity_path.write_text("计划名称,投放ID,花费\n智能推广,PID-001,10.00\n", encoding="utf-8-sig")
+            campaign = parse_campaign(identity_path)
+            self.assertEqual(campaign["records"][0]["identities"], {"placement_id": "PID-001"})
+            payload, audit, gates = build_golden_payload(
+                model,
+                financial("Store-Product A", 1000),
+                [campaign],
+                None,
+                LocalMemory(RuntimePaths.for_workspace(Path(root))),
+                {},
+                "2026-08-20",
+            )
+            self.assertFalse(gates)
+            self.assertEqual(payload["expense_total_cents"], 1000)
+            identity_decisions = [item for item in audit["resolutions"] if item["source"] == "PID-001"]
+            self.assertTrue(identity_decisions)
+            self.assertEqual(identity_decisions[0]["decision"], VERIFIED)
+            self.assertIn("exact_template_product_identity", {item["type"] for item in identity_decisions[0]["evidence"]})
+
     def test_full_store_exact_sku_and_unique_store_auto_resolve(self):
         with tempfile.TemporaryDirectory() as root:
             model = template(

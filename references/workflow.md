@@ -14,7 +14,7 @@ The implementation preserves the Baseline order as seven resumable phases.
 - Compare all business-source dates. A conflict between business sources is always a Human Gate.
 - A stale template date may be auto-updated only when all business sources agree and the workspace memory contains the controlled confirmed rule.
 - Find exact-file duplicates and record-level duplicate evidence.
-- Run Evidence Resolution: deterministic identity, structural rules, semantic/context candidates, cross-file corroboration, contradiction checks, and reconciliation consequences.
+- Run Evidence Resolution: unified deterministic product identity, structural rules, bounded semantic/context candidates, cross-file corroboration, unique global cent constraints, contradiction checks, and reconciliation consequences.
 - Record `VERIFIED` and contradiction-free `MACHINE_INFERRED` decisions in the run audit. Coalesce only the remaining unresolved business facts into Human Gates.
 - Persist `current-run.json` before returning `HUMAN_REQUIRED`.
 

@@ -21,6 +21,22 @@ function key(value) {
   return text(value).toLowerCase().replace(/[\s_（）()\-—]+/g, "");
 }
 
+function identityKind(value) {
+  return ({
+    sku: "sku",
+    skuid: "sku",
+    商品id: "product_id",
+    商品编号: "product_id",
+    投放id: "placement_id",
+    投放编号: "placement_id",
+    投放商品id: "platform_item_id",
+    投放商品编号: "platform_item_id",
+    平台商品id: "platform_item_id",
+    平台商品编号: "platform_item_id",
+    平台稳定商品标识: "platform_item_id",
+  })[key(value)] ?? null;
+}
+
 function colName(index) {
   let n = index + 1;
   let out = "";
@@ -212,6 +228,43 @@ function locateTemplateModel(workbook) {
   }
 
   const productNames = new Set(products.map((item) => key(item.name)));
+  const productByKey = new Map(products.map((item) => [key(item.name), item.name]));
+  const identityMap = {};
+  const identityConflicts = [];
+  function registerIdentity(kind, value, product) {
+    const identity = text(value);
+    if (!kind || !identity || !product) return;
+    identityMap[kind] ??= {};
+    const existing = identityMap[kind][identity];
+    if (existing && key(existing.product) !== key(product)) {
+      let conflict = identityConflicts.find((item) => item.identity_type === kind && item.value === identity);
+      if (!conflict) {
+        conflict = { identity_type: kind, value: identity, products: [existing.product] };
+        identityConflicts.push(conflict);
+      }
+      if (!conflict.products.some((item) => key(item) === key(product))) conflict.products.push(product);
+      return;
+    }
+    if (!existing) identityMap[kind][identity] = { product };
+  }
+  for (const [sku, mapped] of Object.entries(skuMap)) registerIdentity("sku", sku, mapped.product);
+  for (const candidate of sheets) {
+    for (let r = 0; r < candidate.values.length; r += 1) {
+      const row = candidate.values[r] ?? [];
+      const productCol = row.findIndex((value) => ["商品名称", "产品名称", "产品"].includes(key(value)));
+      const identityCols = row
+        .map((value, col) => ({ col, kind: identityKind(value) }))
+        .filter((item) => item.kind);
+      if (productCol < 0 || !identityCols.length) continue;
+      for (let rr = r + 1; rr < candidate.values.length; rr += 1) {
+        const rawProduct = text(candidate.values[rr]?.[productCol]);
+        if (!rawProduct) break;
+        const product = productByKey.get(key(rawProduct));
+        if (!product) continue;
+        for (const item of identityCols) registerIdentity(item.kind, candidate.values[rr]?.[item.col], product);
+      }
+    }
+  }
   const storeGroups = [];
   for (const candidate of sheets) {
     if (candidate.name === report.name || candidate.name === skuSheet?.name) continue;
@@ -257,6 +310,7 @@ function locateTemplateModel(workbook) {
       store_rows: storeValues,
     },
     sku: skuSheet ? { sheet: skuSheet.name, columns: skuColumns, products: skuProducts, map: skuMap, conflicts: skuConflicts, secondary_value_range: secondaryValueRange } : null,
+    identity: { map: identityMap, conflicts: identityConflicts },
     store_groups: storeGroups,
     observed: { product_count: products.length, sku_count: Object.keys(skuMap).length },
   };
@@ -364,6 +418,7 @@ async function verifyWorkbook(templatePath, outputPath, payloadPath, renderDir) 
   if (JSON.stringify(sheetNamesBefore) !== JSON.stringify(sheetNamesAfter)) failures.push("sheet_names_or_order_changed");
   if (JSON.stringify(before.report.products.map((p) => p.name)) !== JSON.stringify(after.report.products.map((p) => p.name))) failures.push("product_order_changed");
   if (JSON.stringify(before.sku?.map ?? {}) !== JSON.stringify(after.sku?.map ?? {})) failures.push("sku_mapping_changed");
+  if (JSON.stringify(before.identity?.map ?? {}) !== JSON.stringify(after.identity?.map ?? {})) failures.push("product_identity_mapping_changed");
 
   const report = output.worksheets.getItem(after.report.sheet);
   const expectedExpense = payload.product_expenses.reduce((sum, item) => sum + item.components_cents.reduce((a, b) => a + b, 0), 0);

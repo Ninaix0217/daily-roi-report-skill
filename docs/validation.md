@@ -5,7 +5,7 @@
 - Input: file manifest, SHA-256, content classification, internal dates, required sources, exact duplicate files.
 - Template: dynamic products/SKUs/store groups, sheets, writable regions, formula precedent, structure fingerprint.
 - Expense: product component totals, each multi-product store, financial ledger equality, duplicate decisions.
-- Evidence resolution: exact SKU/item identity, structural generic plans, unique multi-evidence inference, contradiction handling, grouped Human questions, and multi-source confirmation persistence.
+- Evidence resolution: unified exact product identity, structural generic plans, bounded candidate generation, unique global store constraints, ambiguous semantics, contradiction handling, grouped Human questions, and multi-source confirmation persistence.
 - Sales: text SKU coverage, external SKU gates, reported total equality, explicit brushing subtraction.
 - Workbook: formulas, expected values, error tokens, sheet/order/product structure, merges, widths, heights, critical styles.
 - Visual: every sheet is rendered; PASS is assigned only after images are reviewed.

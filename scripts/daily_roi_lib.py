@@ -26,6 +26,7 @@ from evidence_resolution import (
     alias_family,
     merge_human_decisions,
     resolve_entity,
+    resolve_global_store_constraints,
 )
 
 
@@ -456,6 +457,79 @@ def resolve_store(source: str, stores: list[str], memory: LocalMemory, run_mappi
     return None
 
 
+def identity_type_for_header(header: Any) -> str | None:
+    key = norm(header)
+    aliases = {
+        "sku": "sku",
+        "skuid": "sku",
+        "商品id": "product_id",
+        "商品编号": "product_id",
+        "投放id": "placement_id",
+        "投放编号": "placement_id",
+        "投放商品id": "platform_item_id",
+        "投放商品编号": "platform_item_id",
+        "平台商品id": "platform_item_id",
+        "平台商品编号": "platform_item_id",
+        "平台稳定商品标识": "platform_item_id",
+    }
+    return aliases.get(key)
+
+
+def record_identity_values(record: dict[str, Any]) -> dict[str, str]:
+    values = {
+        str(kind): str(value).strip()
+        for kind, value in dict(record.get("identities") or {}).items()
+        if str(value or "").strip()
+    }
+    legacy = str(record.get("sku") or "").strip()
+    if legacy and legacy not in values.values():
+        values[str(record.get("identity_type") or "sku")] = legacy
+    return values
+
+
+def build_product_identity_index(template: dict[str, Any], campaigns: Iterable[dict[str, Any]] = ()) -> dict[str, list[dict[str, str]]]:
+    index: dict[str, list[dict[str, str]]] = defaultdict(list)
+
+    def register(value: Any, product: Any, identity_type: str, origin: str) -> bool:
+        key = str(value or "").strip()
+        target = str(product or "").strip()
+        if not key or not target:
+            return False
+        entry = {"product": target, "identity_type": identity_type, "origin": origin}
+        if entry not in index[key]:
+            index[key].append(entry)
+            return True
+        return False
+
+    for value, mapped in ((template.get("sku") or {}).get("map") or {}).items():
+        register(value, mapped.get("product"), "sku", "template_sku_map")
+    for identity_type, mapping in ((template.get("identity") or {}).get("map") or {}).items():
+        for value, mapped in dict(mapping or {}).items():
+            product = mapped.get("product") if isinstance(mapped, dict) else mapped
+            register(value, product, str(identity_type), "template_identity_map")
+    for conflict in ((template.get("identity") or {}).get("conflicts") or []):
+        for product in conflict.get("products", []):
+            register(conflict.get("value"), product, str(conflict.get("identity_type") or "unknown"), "template_identity_conflict")
+
+    products = {norm(item["name"]): item["name"] for item in template["report"]["products"]}
+    rows = [record for campaign in campaigns for record in campaign.get("records", [])]
+    changed = True
+    while changed:
+        changed = False
+        for record in rows:
+            identities = record_identity_values(record)
+            exact_name = products.get(norm(record.get("product_name")))
+            targets = {entry["product"] for value in identities.values() for entry in index.get(value, [])}
+            if exact_name:
+                targets.add(exact_name)
+            if len(targets) != 1:
+                continue
+            target = next(iter(targets))
+            for identity_type, value in identities.items():
+                changed = register(value, target, identity_type, "current_file_exact_identity_bridge") or changed
+    return dict(index)
+
+
 def resolve_product_evidence(
     source: str,
     template: dict[str, Any],
@@ -463,7 +537,11 @@ def resolve_product_evidence(
     run_mappings: dict[str, str],
     *,
     identity_value: str = "",
+    identity_values: dict[str, str] | None = None,
+    identity_index: dict[str, list[dict[str, str]]] | None = None,
     context_products: Iterable[str] | None = None,
+    semantic_products: Iterable[str] | None = None,
+    source_scope: str | None = None,
     sibling_sources: Iterable[str] = (),
     cross_file_targets: Iterable[str] = (),
     reconciliation: dict[str, Any] | None = None,
@@ -495,14 +573,25 @@ def resolve_product_evidence(
 
     sku_model = template.get("sku") or {}
     sku_map = sku_model.get("map", {})
-    if identity_value:
-        mapped = sku_map.get(str(identity_value))
-        if mapped:
-            exact_matches.append((mapped["product"], "exact_template_sku", {"sku": str(identity_value)}))
+    identities = dict(identity_values or {})
+    if identity_value and str(identity_value).strip() not in identities.values():
+        identities["sku"] = str(identity_value).strip()
+    product_identities = identity_index if identity_index is not None else build_product_identity_index(template)
+    for source_identity_type, value in identities.items():
+        for mapped in product_identities.get(str(value).strip(), []):
+            if str(mapped.get("identity_type")) != str(source_identity_type):
+                continue
+            evidence_type = "exact_template_sku" if mapped["identity_type"] == "sku" else "exact_template_product_identity"
+            exact_matches.append((mapped["product"], evidence_type, {
+                "identity_type": source_identity_type,
+                "identity_value": str(value).strip(),
+                "registered_identity_type": mapped["identity_type"],
+                "origin": mapped["origin"],
+            }))
         for conflict in sku_model.get("conflicts", []):
-            if str(conflict.get("sku")) == str(identity_value):
+            if str(conflict.get("sku")) == str(value).strip():
                 for target in conflict.get("products", []):
-                    exact_matches.append((target, "conflicting_template_sku", {"sku": str(identity_value)}))
+                    exact_matches.append((target, "conflicting_template_sku", {"sku": str(value).strip()}))
 
     return resolve_entity(
         source,
@@ -510,6 +599,8 @@ def resolve_product_evidence(
         entity_type="product",
         exact_matches=exact_matches,
         context_candidates=context_products,
+        semantic_candidates=semantic_products,
+        source_scope=source_scope,
         sibling_sources=sibling_sources,
         cross_file_targets=cross_file_targets,
         reconciliation=reconciliation,
@@ -586,26 +677,40 @@ def parse_campaign(path: Path) -> dict[str, Any] | None:
         (header_by_key[key] for key in ("记录id", "流水id", "明细id", "计划id", "id") if key in header_by_key),
         None,
     )
-    sku_header = header_index(headers, "SKU ID", "SKU", "投放商品 ID", "投放商品ID", "商品 ID", "商品ID")
+    identity_headers = {header: identity_type_for_header(header) for header in headers if identity_type_for_header(header)}
+    identity_priority = {"sku": 0, "product_id": 1, "placement_id": 2, "platform_item_id": 3}
+    ordered_identity_headers = sorted(identity_headers, key=lambda header: identity_priority.get(str(identity_headers[header]), 99))
+    primary_identity_header = ordered_identity_headers[0] if ordered_identity_headers else None
     date_header = header_index(headers, "日期", "时间", "投放日期")
-    plan_header = headers[0] if headers else None
+    plan_header = header_index(headers, "计划名称", "推广计划", "计划") or (headers[0] if headers else None)
+    product_header = header_index(headers, "商品名称", "产品名称", "投放商品名称")
     records = []
     internal_dates = set()
     for index, row in enumerate(rows, 2):
         if date_header:
             internal_dates |= extract_dates([row.get(date_header)])
+        identities = {
+            str(identity_headers[header]): str(row.get(header, "") or "").strip()
+            for header in ordered_identity_headers
+            if str(row.get(header, "") or "").strip()
+        }
+        primary_type = str(identity_headers.get(primary_identity_header) or "")
+        primary_identity = identities.get(primary_type, "")
         records.append({
             "row": index,
             "plan": row.get(plan_header, "") if plan_header else "",
             "record_id": row.get(id_header, "") if id_header else "",
-            "sku": row.get(sku_header, "") if sku_header else "",
-            "identity_header": sku_header,
+            "sku": primary_identity,
+            "identity_type": primary_type,
+            "identities": identities,
+            "identity_header": primary_identity_header,
+            "product_name": row.get(product_header, "") if product_header else "",
             "cost_cents": to_cents(row.get(cost_header, "0")),
             "raw": row,
         })
     dates, date_evidence = filename_date_evidence(path, internal_dates)
     return {
-        "kind": "campaign_full_store" if sku_header else "campaign_regular",
+        "kind": "campaign_full_store" if identity_headers else "campaign_regular",
         "path": str(path.resolve()),
         "name": path.name,
         "headers": headers,
@@ -613,7 +718,8 @@ def parse_campaign(path: Path) -> dict[str, Any] | None:
         "dates": sorted(dates),
         "date_evidence": date_evidence,
         "records": records,
-        "identity_header": sku_header,
+        "identity_header": primary_identity_header,
+        "identity_headers": identity_headers,
         "total_cents": sum(item["cost_cents"] for item in records),
     }
 
@@ -922,6 +1028,7 @@ def build_golden_payload(
 
     regular = [item for item in campaigns if item["kind"] == "campaign_regular"]
     full_store = [item for item in campaigns if item["kind"] == "campaign_full_store"]
+    identity_index = build_product_identity_index(template, campaigns)
 
     sibling_plans: dict[str, list[str]] = defaultdict(list)
     for campaign in regular:
@@ -930,14 +1037,16 @@ def build_golden_payload(
                 sibling_plans[alias_family(record["plan"])].append(record["plan"])
 
     cross_file_hints: dict[str, set[str]] = defaultdict(set)
-    sku_map = (template.get("sku") or {}).get("map", {})
-    sku_conflicts = {str(item.get("sku")) for item in (template.get("sku") or {}).get("conflicts", [])}
     for campaign in campaigns:
         for record in campaign["records"]:
-            mapped = sku_map.get(str(record.get("sku") or ""))
+            identity_targets = {
+                mapped["product"]
+                for value in record_identity_values(record).values()
+                for mapped in identity_index.get(value, [])
+            }
             family = alias_family(record.get("plan"))
-            if record["cost_cents"] and mapped and str(record.get("sku")) not in sku_conflicts and family:
-                cross_file_hints[family].add(mapped["product"])
+            if record["cost_cents"] and len(identity_targets) == 1 and family:
+                cross_file_hints[family].add(next(iter(identity_targets)))
 
     canonical_ledger: dict[str, dict[str, Any]] = {}
     for raw_store, amount in ledger_by_store.items():
@@ -977,12 +1086,90 @@ def build_golden_payload(
         if product and amount:
             components[product].insert(0, {"cents": amount, "source_file": financial["source_name"], "kind": "financial_single_store", "store": raw_store})
 
+    global_facts = []
+    for campaign in campaigns:
+        resolved_products: set[str] = set()
+        has_conflict = False
+        for record in campaign["records"]:
+            if not record["cost_cents"]:
+                continue
+            identities = record_identity_values(record)
+            source = record.get("product_name") or next(iter(identities.values()), "") or record.get("plan") or ""
+            decision = resolve_product_evidence(
+                source,
+                template,
+                memory,
+                run_mappings,
+                identity_values=identities,
+                identity_index=identity_index,
+                semantic_products=[],
+                source_scope="deterministic_identity_only",
+            )
+            if decision.get("contradictions"):
+                has_conflict = True
+            if decision.get("decision") != HUMAN_REQUIRED and decision.get("candidate"):
+                resolved_products.add(str(decision["candidate"]))
+        candidate_stores = [
+            store_name
+            for store_name, members in group_products.items()
+            if not resolved_products or resolved_products.issubset(members)
+        ]
+        if campaign["kind"] == "campaign_regular":
+            families = sorted({alias_family(item["plan"]) for item in campaign["records"] if item["cost_cents"] and alias_family(item["plan"])})
+            assignment_token = "regular_store:" + hashlib.sha256(json.dumps(families, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+        else:
+            assignment_token = "full_store_export"
+        assigned_target = run_mappings.get(f"campaign:{norm(assignment_token)}") or memory.resolve("campaign", assignment_token)
+        assigned_store = resolve_store(assigned_target or "", group_names, memory, run_mappings) if assigned_target else None
+        if assigned_target and not assigned_store:
+            has_conflict = True
+        elif assigned_store:
+            if assigned_store not in candidate_stores:
+                has_conflict = True
+            else:
+                candidate_stores = [assigned_store]
+        if campaign["total_cents"] and candidate_stores:
+            global_facts.append({
+                "id": str(id(campaign)),
+                "source": campaign["name"],
+                "total_cents": campaign["total_cents"],
+                "candidate_stores": candidate_stores,
+                "products": sorted(resolved_products),
+                "has_conflict": has_conflict,
+            })
+    global_constraints = resolve_global_store_constraints(
+        global_facts,
+        {store: canonical_ledger.get(store, {}).get("amount_cents", 0) for store in group_names},
+    )
+    global_store_decisions = dict(global_constraints.get("decisions") or {})
+
     for campaign in regular:
         regular_families = sorted({alias_family(item["plan"]) for item in campaign["records"] if item["cost_cents"] and alias_family(item["plan"])})
         regular_store_token = "regular_store:" + hashlib.sha256(json.dumps(regular_families, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
         assigned_store = run_mappings.get(f"campaign:{norm(regular_store_token)}") or memory.resolve("campaign", regular_store_token)
         assigned_store = resolve_store(assigned_store or "", group_names, memory, run_mappings) if assigned_store else None
+        global_store_decision = global_store_decisions.get(str(id(campaign)))
+        global_store = str((global_store_decision or {}).get("candidate") or "") or None
+        if assigned_store and global_store and assigned_store != global_store:
+            conflict = resolve_entity(
+                regular_store_token,
+                group_names,
+                entity_type="store",
+                exact_matches=[
+                    (assigned_store, "human_confirmed_store_assignment", None),
+                    (global_store, "global_constraint_unique_solution", None),
+                ],
+            )
+            conflict["entity_type"] = "campaign"
+            conflict["mapping_sources"] = [regular_store_token]
+            conflict["target_kind"] = "store"
+            retain_decision(conflict, gate_type="HG-06", context={"file": campaign["name"]})
+            continue
+        store = assigned_store or global_store
+        if global_store_decision and not assigned_store:
+            retain_decision(global_store_decision)
         provisional: list[dict[str, Any]] = []
+        scoped_products = group_products.get(store, set()) if store else set()
         for record in campaign["records"]:
             plan = record["plan"]
             generic = norm(plan) in {"单盒", "三盒", "1", "3", "一盒", "3盒", "1盒"}
@@ -993,7 +1180,11 @@ def build_golden_payload(
                     template,
                     memory,
                     run_mappings,
-                    identity_value=record.get("sku", ""),
+                    identity_values=record_identity_values(record),
+                    identity_index=identity_index,
+                    context_products=scoped_products if scoped_products else None,
+                    semantic_products=None if scoped_products else [],
+                    source_scope="current_store_products" if scoped_products else "deterministic_identity_only",
                     sibling_sources=sibling_plans.get(alias_family(plan), []),
                     cross_file_targets=cross_file_hints.get(alias_family(plan), set()),
                 )
@@ -1011,7 +1202,7 @@ def build_golden_payload(
             store for store in candidates
             if canonical_ledger.get(store, {}).get("amount_cents") == campaign["total_cents"]
         ]
-        store = assigned_store or (candidates[0] if len(candidates) == 1 else (reconciled_candidates[0] if len(reconciled_candidates) == 1 else None))
+        store = store or (candidates[0] if len(candidates) == 1 else (reconciled_candidates[0] if len(reconciled_candidates) == 1 else None))
         if store:
             reconciliation = {
                 "status": "PASS",
@@ -1028,8 +1219,11 @@ def build_golden_payload(
                     template,
                     memory,
                     run_mappings,
-                    identity_value=item["record"].get("sku", ""),
-                    context_products=group_products.get(store, set()),
+                    identity_values=record_identity_values(item["record"]),
+                    identity_index=identity_index,
+                    context_products=group_products.get(store, set()) or None,
+                    semantic_products=None if group_products.get(store, set()) else [],
+                    source_scope="current_store_products" if group_products.get(store, set()) else "deterministic_identity_only",
                     sibling_sources=sibling_plans.get(alias_family(plan), []),
                     cross_file_targets=cross_file_hints.get(alias_family(plan), set()),
                     reconciliation=reconciliation,
@@ -1139,29 +1333,54 @@ def build_golden_payload(
     for campaign in full_store:
         source_token = "full_store_export"
         assigned = run_mappings.get(f"campaign:{norm(source_token)}") or memory.resolve("campaign", source_token)
-        store = resolve_store(assigned or "", group_names, memory, run_mappings) if assigned else None
+        assigned_store = resolve_store(assigned or "", group_names, memory, run_mappings) if assigned else None
+        global_store_decision = global_store_decisions.get(str(id(campaign)))
+        global_store = str((global_store_decision or {}).get("candidate") or "") or None
+        if assigned_store and global_store and assigned_store != global_store:
+            conflict = resolve_entity(
+                source_token,
+                group_names,
+                entity_type="store",
+                exact_matches=[
+                    (assigned_store, "human_confirmed_store_assignment", None),
+                    (global_store, "global_constraint_unique_solution", None),
+                ],
+            )
+            conflict["entity_type"] = "campaign"
+            conflict["target_kind"] = "store"
+            retain_decision(conflict, gate_type="HG-06", context={"file": campaign["name"]})
+            continue
+        store = assigned_store or global_store
+        if global_store_decision and not assigned_store:
+            retain_decision(global_store_decision)
         split = defaultdict(int)
         record_decisions = []
+        scoped_products = group_products.get(store, set()) if store else set()
         for record in campaign["records"]:
-            source = record.get("sku") or record.get("plan") or ""
+            identities = record_identity_values(record)
+            source = record.get("product_name") or next(iter(identities.values()), "") or record.get("plan") or ""
             decision = resolve_product_evidence(
                 source,
                 template,
                 memory,
                 run_mappings,
-                identity_value=record.get("sku", ""),
+                identity_values=identities,
+                identity_index=identity_index,
+                context_products=scoped_products if scoped_products else None,
+                semantic_products=None if scoped_products else [],
+                source_scope="current_store_products" if scoped_products else "deterministic_identity_only",
                 sibling_sources=sibling_plans.get(alias_family(record.get("plan")), []),
                 cross_file_targets=cross_file_hints.get(alias_family(record.get("plan")), set()),
             )
-            decision["entity_type"] = "sku"
-            decision["fact_family"] = f"sku:{norm(source)}"
+            decision["entity_type"] = "product"
+            decision["fact_family"] = f"product-identity:{record.get('identity_type') or 'unknown'}:{norm(source)}"
             record_decisions.append((record, decision))
         unresolved = [item for item in record_decisions if item[0]["cost_cents"] and item[1].get("decision") == HUMAN_REQUIRED]
         for record, decision in record_decisions:
             resolved = retain_decision(
                 decision,
                 gate_type="HG-05" if record["cost_cents"] and decision.get("decision") == HUMAN_REQUIRED else None,
-                context={"file": campaign["name"], "row": record["row"], "sku": record.get("sku"), "amount": cents_text(record["cost_cents"])} if record["cost_cents"] else None,
+                context={"file": campaign["name"], "row": record["row"], "identities": record_identity_values(record), "amount": cents_text(record["cost_cents"])} if record["cost_cents"] else None,
             )
             if not resolved or not record["cost_cents"]:
                 continue
@@ -1203,7 +1422,7 @@ def build_golden_payload(
                 resolved = str(decision.get("candidate") or "")
                 if not resolved or not record["cost_cents"]:
                     continue
-                component = {"cents": record["cost_cents"], "source_file": campaign["name"], "row": record["row"], "kind": "campaign_full_store", "store": store, "sku": record["sku"]}
+                component = {"cents": record["cost_cents"], "source_file": campaign["name"], "row": record["row"], "kind": "campaign_full_store", "store": store, "identities": record_identity_values(record)}
                 components[resolved].append(component)
                 audit_campaign_records.append({**record, "resolved_product": resolved, "source_kind": campaign["kind"], "source_file": campaign["name"], "date": target_date})
             merge_store_split(store, campaign["name"], dict(split))
