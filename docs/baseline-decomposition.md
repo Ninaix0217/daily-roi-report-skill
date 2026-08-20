@@ -9,7 +9,7 @@ The v0 decomposition preserves behavior rather than shortening policy:
 | Execution order and stop-before-write | `SKILL.md`, `references/workflow.md`, workflow engine |
 | Template is authoritative | workbook worker and `references/template-and-workbook.md` |
 | File identification and dates | Python discovery/preflight |
-| Mapping questions | structured Human Gates |
+| Mapping decisions | Evidence Resolution Layer, followed by structured Human Gates only for unresolved business facts |
 | Confirmed aliases/rules | employee `.daily-roi/memory.json`, never Skill Core |
 | Deduplication | deterministic identity classifier and audit |
 | Product-level cost aggregation | accounting payload builder |
@@ -19,6 +19,8 @@ The v0 decomposition preserves behavior rather than shortening policy:
 | Delivery summary | output contract |
 
 The Golden case's observed facts are present only in expected fixtures and test memory. They are not production assumptions.
+
+`v0.1.0-rc.1` remains the frozen distribution baseline. The rc.2 architecture correction does not relax accounting, deduplication, write, or reconciliation invariants; it corrects the earlier orchestration assumption that a Local Memory miss necessarily requires a human question.
 
 ## Optimization candidates
 

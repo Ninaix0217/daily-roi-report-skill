@@ -10,7 +10,7 @@
 | Current/run state | Employee workspace | `<workspace>/.daily-roi/current-run.json` and `runs/` | task/audit state, never default knowledge |
 | Golden fixtures | Developer | `evals/` | test only |
 
-Memory v1 accepts confirmed entity mappings for `store`, `product`, `campaign`, and `sku`, plus the single controlled rule `auto_update_stale_template_date`. It rejects candidate status, AI inference, free-form rules, and conflicting mappings.
+Memory v1 accepts confirmed entity mappings for `store`, `product`, `campaign`, and `sku`, plus the single controlled rule `auto_update_stale_template_date`. It rejects candidate status, machine inference, free-form rules, and conflicting mappings. Evidence Resolution decisions remain run audit unless a Human Gate explicitly confirms reusable semantics.
 
 ## Gate policy
 
@@ -21,12 +21,14 @@ Memory v1 accepts confirmed entity mappings for `store`, `product`, `campaign`, 
 - `HG-05`: template-external nonzero SKU or incomplete template SKU coverage.
 - `HG-06`: unknown nonzero campaign/product attribution or ambiguous input classification.
 
-Each gate stores an ID, type, blocking reason, evidence, optional candidate resolution, question, and optional persistence candidate. The assistant must show all safely discoverable gates together.
+Each gate stores an ID, type, blocking reason, evidence, alternatives/contradictions inside the resolution result, optional candidate resolution, question, and optional persistence candidate. Internal blockers are coalesced by independent business fact and alias family before presentation. The assistant must show all safely discoverable business questions together.
 
 ## Resolution semantics
 
 - `PERSISTENT_REUSABLE`: only when the user explicitly confirms a reusable mapping or controlled rule. Write memory and resume.
 - `RUN_ONLY`: apply to `current-run.json` only, append audit, and resume.
 - `REJECTED`: append the rejection; do not mutate memory and do not bypass the blocker.
+
+A grouped mapping contains all equivalent sources. One confirmation applies to every listed source; persistence writes each exact source mapping separately so later exact lookup remains deterministic.
 
 The resume operation retains the run ID and run mappings, rereads inputs, and recomputes deterministic checks. This avoids restarting conversational analysis while detecting source mutations.

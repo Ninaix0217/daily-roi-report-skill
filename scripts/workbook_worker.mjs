@@ -145,6 +145,7 @@ function locateTemplateModel(workbook) {
 
   const skuProducts = [];
   const skuMap = {};
+  const skuConflicts = [];
   let skuColumns = null;
   let secondaryValueRange = null;
   if (skuSheet) {
@@ -181,8 +182,17 @@ function locateTemplateModel(workbook) {
         brush_value: brushCol === null ? null : skuSheet.values[r]?.[brushCol] ?? null,
       };
       skuProducts.push(item);
-      if (singleSku) skuMap[singleSku] = { product: productName, spec: "single" };
-      if (tripleSku) skuMap[tripleSku] = { product: productName, spec: "triple" };
+      for (const [sku, spec] of [[singleSku, "single"], [tripleSku, "triple"]]) {
+        if (!sku) continue;
+        const existing = skuMap[sku];
+        if (existing && key(existing.product) !== key(productName)) {
+          const conflict = skuConflicts.find((item) => item.sku === sku) ?? { sku, products: [existing.product] };
+          if (!conflict.products.some((item) => key(item) === key(productName))) conflict.products.push(productName);
+          if (!skuConflicts.some((item) => item.sku === sku)) skuConflicts.push(conflict);
+          continue;
+        }
+        if (!existing) skuMap[sku] = { product: productName, spec };
+      }
     }
     let best = null;
     const width = Math.max(...skuSheet.values.map((row) => row?.length ?? 0), 0);
@@ -246,7 +256,7 @@ function locateTemplateModel(workbook) {
       products,
       store_rows: storeValues,
     },
-    sku: skuSheet ? { sheet: skuSheet.name, columns: skuColumns, products: skuProducts, map: skuMap, secondary_value_range: secondaryValueRange } : null,
+    sku: skuSheet ? { sheet: skuSheet.name, columns: skuColumns, products: skuProducts, map: skuMap, conflicts: skuConflicts, secondary_value_range: secondaryValueRange } : null,
     store_groups: storeGroups,
     observed: { product_count: products.length, sku_count: Object.keys(skuMap).length },
   };

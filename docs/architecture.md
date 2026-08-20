@@ -8,6 +8,11 @@ The system is intentionally a local-file Codex Skill. It does not replace the bu
 Codex + SKILL.md
   -> Python workflow engine
        -> content-based input classification
+       -> Evidence Resolution Layer
+            -> deterministic identity
+            -> structural attribution
+            -> semantic/context candidates
+            -> contradiction/reconciliation checks
        -> Decimal accounting and reconciliation
        -> workspace Local Memory / Human Gates / run state
        -> legacy .xls conversion
@@ -21,6 +26,7 @@ Codex + SKILL.md
 
 - `SKILL.md`: concise control plane and safety contract.
 - `scripts/daily_roi.py`: CLI.
+- `scripts/evidence_resolution.py`: pure evidence decisions and Human-question coalescing.
 - `scripts/daily_roi_lib.py`: discovery, memory, gates, accounting, state, conversion, and orchestration.
 - `scripts/workbook_worker.mjs`: workbook inspection, dynamic model construction, writing, formula validation, and rendering.
 - `schemas/`: persisted data contracts.
@@ -33,7 +39,11 @@ Skill source is developer-managed and replaceable. `.daily-roi/` is employee-own
 
 ## TemplateModel
 
-The worker locates report and support structures from semantic headers, formulas, and cell relationships. It records sheets, report products, dates, writable cells, SKU mappings, product/store groups, and layout properties. Production code does not use the Golden case's observed product count, SKU count, sheet names, ranges, or stores as constants.
+The worker locates report and support structures from semantic headers, formulas, and cell relationships. It records sheets, report products, dates, writable cells, SKU mappings and conflicts, product/store groups, and layout properties. Production code does not use the Golden case's observed product count, SKU count, sheet names, ranges, or stores as constants.
+
+## Evidence resolution boundary
+
+Unknown detection is not a permission boundary. The resolver first attempts exact identity and template relationships, then bounded semantic/context reasoning against current runtime candidates. It produces evidence-bearing `VERIFIED`, `MACHINE_INFERRED`, or `HUMAN_REQUIRED` decisions. Only the last class becomes a Human Gate. Machine decisions are never durable Local Memory.
 
 ## Technology choice
 

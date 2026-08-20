@@ -1,6 +1,6 @@
 # Daily ROI Report Skill v0
 
-This standalone Codex Skill turns an existing daily ROI Excel workflow into a repeatable local-file process. It discovers the current template structure, reconciles paid advertising cost and optional sales data, pauses on material unknowns, remembers only reusable human confirmations in the employee's own workspace, preserves the workbook layout, and produces a verified `.xlsx` copy.
+This standalone Codex Skill turns an existing daily ROI Excel workflow into a repeatable local-file process. It discovers the current template structure, resolves unknown entities through auditable identity/structural/context evidence, reconciles paid advertising cost and optional sales data, pauses only when material evidence remains ambiguous, remembers only reusable human confirmations in the employee's own workspace, preserves the workbook layout, and produces a verified `.xlsx` copy.
 
 The shared Skill contains workflow and verification logic only. It does not ship employee store aliases, product aliases, campaign shorthand, SKUs, dates, or business amounts.
 
@@ -14,7 +14,7 @@ The Skill never downloads or installs dependencies. If a required dependency is 
 
 ## Install from GitHub
 
-Clone or download the selected private GitHub release tag. Keep the repository checkout separate from the employee's daily report workspace.
+Clone or download the selected GitHub release tag. Keep the repository checkout separate from the employee's daily report workspace and pin employee acceptance to that tag rather than moving `main`.
 
 Install by copying or symlinking this directory to a Codex skill discovery location:
 
@@ -65,7 +65,7 @@ Install LibreOffice through the employee's normal IT process, then rerun. The Sk
 
 In the employee's clean workspace, ask Codex to use `$daily-roi-report-skill`, then provide the `input/` and `output/` locations. The Skill performs discovery, dependency preflight, reconciliation, protected writing, deterministic verification, and sheet rendering.
 
-On a first run, an unknown nonzero mapping produces a structured Human Gate. After the user confirms it, Codex classifies the answer as reusable or run-only, records it, and resumes the same run. A reusable confirmation is automatically applied in later runs in that same workspace.
+On a first run, the Skill first attempts deterministic identity, template structure, semantic/context corroboration, contradiction checks, and reconciliation. Only a nonzero fact that remains genuinely ambiguous produces a structured Human Gate. Related aliases are grouped into one business question. After confirmation, Codex classifies the answer as reusable or run-only, records it, and resumes the same run. A reusable confirmation is automatically applied in later runs in that same workspace.
 
 For direct CLI use:
 

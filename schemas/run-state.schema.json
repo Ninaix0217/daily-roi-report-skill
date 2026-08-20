@@ -13,6 +13,20 @@
     "output_dir": { "type": "string" },
     "manifest": { "type": "array" },
     "gates": { "type": "array", "items": { "$ref": "human-gate.schema.json" } },
-    "run_mappings": { "type": "object", "additionalProperties": { "type": "string" } }
+    "run_mappings": { "type": "object", "additionalProperties": { "type": "string" } },
+    "audit": {
+      "type": ["object", "null"],
+      "properties": {
+        "resolutions": { "type": "array", "items": { "$ref": "evidence-resolution.schema.json" } },
+        "resolution_summary": {
+          "type": "object",
+          "properties": {
+            "verified": { "type": "integer", "minimum": 0 },
+            "machine_inferred": { "type": "integer", "minimum": 0 },
+            "human_required": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
   }
 }

@@ -22,6 +22,7 @@ def summary(state: dict) -> dict:
         "input_file_count": len(state.get("manifest", [])),
         "human_gate_count": len(state.get("gates", [])),
         "gates": state.get("gates", []),
+        "resolution_summary": audit.get("resolution_summary"),
         "financial_total": _money(audit.get("financial_total_cents")),
         "product_expense_total": _money(audit.get("product_expense_total_cents")),
         "expense_difference": _money(audit.get("expense_difference_cents")),

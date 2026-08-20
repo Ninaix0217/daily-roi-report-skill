@@ -19,6 +19,15 @@ from pathlib import Path
 from typing import Any, Iterable
 from xml.etree import ElementTree as ET
 
+from evidence_resolution import (
+    HUMAN_REQUIRED,
+    MACHINE_INFERRED,
+    VERIFIED,
+    alias_family,
+    merge_human_decisions,
+    resolve_entity,
+)
+
 
 MONEY = Decimal("0.01")
 STATE_DIR_NAME = ".daily-roi"
@@ -447,6 +456,120 @@ def resolve_store(source: str, stores: list[str], memory: LocalMemory, run_mappi
     return None
 
 
+def resolve_product_evidence(
+    source: str,
+    template: dict[str, Any],
+    memory: LocalMemory,
+    run_mappings: dict[str, str],
+    *,
+    identity_value: str = "",
+    context_products: Iterable[str] | None = None,
+    sibling_sources: Iterable[str] = (),
+    cross_file_targets: Iterable[str] = (),
+    reconciliation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    products = [item["name"] for item in template["report"]["products"]]
+    product_by_key = {norm(item): item for item in products}
+    exact_matches: list[tuple[str, str, dict[str, Any] | None]] = []
+    canonical = product_by_key.get(norm(source))
+    if canonical:
+        exact_matches.append((canonical, "exact_template_product", None))
+    for entity_type in ("campaign", "product", "sku"):
+        run_target = run_mappings.get(f"{entity_type}:{norm(source)}")
+        if run_target:
+            exact_matches.append((run_target, "confirmed_run_mapping", {"mapping_type": entity_type}))
+        memory_target = memory.resolve(entity_type, source)
+        if memory_target:
+            exact_matches.append((memory_target, "human_confirmed_local_mapping", {"mapping_type": entity_type}))
+    stripped = strip_campaign_spec(source)
+    canonical_stripped = product_by_key.get(norm(stripped)) if stripped else None
+    if canonical_stripped:
+        exact_matches.append((canonical_stripped, "exact_template_product_after_spec_normalization", {"normalized_source": stripped}))
+    if stripped and stripped != source:
+        run_target = run_mappings.get(f"product:{norm(stripped)}")
+        if run_target:
+            exact_matches.append((run_target, "confirmed_run_mapping", {"mapping_type": "product", "normalized_source": stripped}))
+        memory_target = memory.resolve("product", stripped)
+        if memory_target:
+            exact_matches.append((memory_target, "human_confirmed_local_mapping", {"mapping_type": "product", "normalized_source": stripped}))
+
+    sku_model = template.get("sku") or {}
+    sku_map = sku_model.get("map", {})
+    if identity_value:
+        mapped = sku_map.get(str(identity_value))
+        if mapped:
+            exact_matches.append((mapped["product"], "exact_template_sku", {"sku": str(identity_value)}))
+        for conflict in sku_model.get("conflicts", []):
+            if str(conflict.get("sku")) == str(identity_value):
+                for target in conflict.get("products", []):
+                    exact_matches.append((target, "conflicting_template_sku", {"sku": str(identity_value)}))
+
+    return resolve_entity(
+        source,
+        products,
+        entity_type="product",
+        exact_matches=exact_matches,
+        context_candidates=context_products,
+        sibling_sources=sibling_sources,
+        cross_file_targets=cross_file_targets,
+        reconciliation=reconciliation,
+    )
+
+
+def resolve_store_evidence(
+    source: str,
+    stores: Iterable[str],
+    memory: LocalMemory,
+    run_mappings: dict[str, str],
+    *,
+    context_stores: Iterable[str] | None = None,
+    reconciliation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    store_list = list(stores)
+    store_by_key = {norm(item): item for item in store_list}
+    exact_matches: list[tuple[str, str, dict[str, Any] | None]] = []
+    canonical = store_by_key.get(norm(source))
+    if canonical:
+        exact_matches.append((canonical, "exact_template_store", None))
+    run_target = run_mappings.get(f"store:{norm(source)}")
+    if run_target:
+        exact_matches.append((run_target, "confirmed_run_mapping", {"mapping_type": "store"}))
+    memory_target = memory.resolve("store", source)
+    if memory_target:
+        exact_matches.append((memory_target, "human_confirmed_local_mapping", {"mapping_type": "store"}))
+    return resolve_entity(
+        source,
+        store_list,
+        entity_type="store",
+        exact_matches=exact_matches,
+        context_candidates=context_stores,
+        reconciliation=reconciliation,
+    )
+
+
+def resolution_gate(decision: dict[str, Any], gate_type: str, *, context: dict[str, Any] | None = None) -> dict[str, Any]:
+    sources = list(decision.get("sources") or [decision.get("source")])
+    mapping_sources = list(decision.get("mapping_sources") or sources)
+    label = " / ".join(str(item) for item in sources if item)
+    entity_type = str(decision.get("entity_type") or "product")
+    target_label = "模板店铺" if entity_type == "store" or decision.get("target_kind") == "store" else "模板产品"
+    candidate = {
+        "entity_type": entity_type,
+        "source": mapping_sources[0] if mapping_sources else decision.get("source"),
+        "sources": mapping_sources,
+        "target": decision.get("candidate"),
+    }
+    evidence = {"resolution": decision, **(context or {})}
+    return make_gate(
+        gate_type,
+        "Evidence Resolution Layer could not produce a unique contradiction-free attribution",
+        evidence,
+        f"“{label}”应归属哪个{target_label}？",
+        candidate=candidate,
+        persistence=candidate,
+    )
+
+
 def filename_date_evidence(path: Path, internal_dates: set[str]) -> tuple[set[str], str]:
     if internal_dates:
         return internal_dates, "internal"
@@ -458,8 +581,12 @@ def parse_campaign(path: Path) -> dict[str, Any] | None:
     cost_header = header_index(headers, "花费", "费用", "支出")
     if not cost_header:
         return None
-    id_header = header_index(headers, "ID", "计划ID", "记录ID")
-    sku_header = header_index(headers, "SKU ID", "SKU")
+    header_by_key = {norm(header): header for header in headers}
+    id_header = next(
+        (header_by_key[key] for key in ("记录id", "流水id", "明细id", "计划id", "id") if key in header_by_key),
+        None,
+    )
+    sku_header = header_index(headers, "SKU ID", "SKU", "投放商品 ID", "投放商品ID", "商品 ID", "商品ID")
     date_header = header_index(headers, "日期", "时间", "投放日期")
     plan_header = headers[0] if headers else None
     records = []
@@ -472,6 +599,7 @@ def parse_campaign(path: Path) -> dict[str, Any] | None:
             "plan": row.get(plan_header, "") if plan_header else "",
             "record_id": row.get(id_header, "") if id_header else "",
             "sku": row.get(sku_header, "") if sku_header else "",
+            "identity_header": sku_header,
             "cost_cents": to_cents(row.get(cost_header, "0")),
             "raw": row,
         })
@@ -485,6 +613,7 @@ def parse_campaign(path: Path) -> dict[str, Any] | None:
         "dates": sorted(dates),
         "date_evidence": date_evidence,
         "records": records,
+        "identity_header": sku_header,
         "total_cents": sum(item["cost_cents"] for item in records),
     }
 
@@ -716,15 +845,53 @@ def build_golden_payload(
     target_date: str,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     gates: list[dict[str, Any]] = []
+    resolutions: list[dict[str, Any]] = []
+    unresolved_decisions: list[dict[str, Any]] = []
     products = [item["name"] for item in template["report"]["products"]]
-    product_keys = {norm(item): item for item in products}
     raw_groups = template.get("store_groups", [])
     group_names = [item["store"] for item in raw_groups]
     group_products: dict[str, set[str]] = {}
+
+    def retain_decision(
+        decision: dict[str, Any],
+        *,
+        gate_type: str | None = None,
+        context: dict[str, Any] | None = None,
+        mapping_type: str | None = None,
+        fact_family: str | None = None,
+    ) -> str | None:
+        item = dict(decision)
+        if mapping_type:
+            item["entity_type"] = mapping_type
+        if fact_family:
+            item["fact_family"] = fact_family
+        if gate_type:
+            item["gate_type"] = gate_type
+        if context:
+            item["contexts"] = [context]
+        resolutions.append(item)
+        if item.get("decision") == HUMAN_REQUIRED:
+            unresolved_decisions.append(item)
+            return None
+        return str(item.get("candidate") or "") or None
+
+    def merge_store_split(store: str, file_name: str, split: dict[str, int]) -> None:
+        current = store_splits.setdefault(store, {"detail_files": [], "products": {}, "split_total_cents": 0})
+        if file_name not in current["detail_files"]:
+            current["detail_files"].append(file_name)
+        for product, amount in split.items():
+            current["products"][product] = current["products"].get(product, 0) + amount
+        current["split_total_cents"] = sum(current["products"].values())
+
     for group in raw_groups:
         resolved = set()
         for member in group.get("products", []):
-            product = resolve_product(member, products, memory, run_mappings)
+            decision = resolve_product_evidence(member, template, memory, run_mappings, context_products=products)
+            product = retain_decision(
+                decision,
+                gate_type="HG-06",
+                context={"template_store": group["store"], "template_member": member},
+            )
             if product:
                 resolved.add(product)
         group_products[group["store"]] = resolved
@@ -756,96 +923,290 @@ def build_golden_payload(
     regular = [item for item in campaigns if item["kind"] == "campaign_regular"]
     full_store = [item for item in campaigns if item["kind"] == "campaign_full_store"]
 
+    sibling_plans: dict[str, list[str]] = defaultdict(list)
     for campaign in regular:
-        non_generic_products: set[str] = set()
-        provisional = []
+        for record in campaign["records"]:
+            if record["cost_cents"] and norm(record["plan"]) not in {"单盒", "三盒", "1", "3", "一盒", "3盒", "1盒"}:
+                sibling_plans[alias_family(record["plan"])].append(record["plan"])
+
+    cross_file_hints: dict[str, set[str]] = defaultdict(set)
+    sku_map = (template.get("sku") or {}).get("map", {})
+    sku_conflicts = {str(item.get("sku")) for item in (template.get("sku") or {}).get("conflicts", [])}
+    for campaign in campaigns:
+        for record in campaign["records"]:
+            mapped = sku_map.get(str(record.get("sku") or ""))
+            family = alias_family(record.get("plan"))
+            if record["cost_cents"] and mapped and str(record.get("sku")) not in sku_conflicts and family:
+                cross_file_hints[family].add(mapped["product"])
+
+    canonical_ledger: dict[str, dict[str, Any]] = {}
+    for raw_store, amount in ledger_by_store.items():
+        store_decision = resolve_store_evidence(raw_store, group_names, memory, run_mappings) if group_names else None
+        canonical = None
+        if store_decision and store_decision.get("decision") != HUMAN_REQUIRED:
+            canonical = retain_decision(store_decision)
+        if canonical:
+            entry = canonical_ledger.setdefault(canonical, {"raw_stores": [], "amount_cents": 0})
+            entry["raw_stores"].append(raw_store)
+            entry["amount_cents"] += amount
+            continue
+
+        suffix = re.split(r"[-—]", raw_store)[-1].strip()
+        product_decision = resolve_product_evidence(
+            suffix,
+            template,
+            memory,
+            run_mappings,
+            sibling_sources=sibling_plans.get(alias_family(suffix), []),
+            cross_file_targets=cross_file_hints.get(alias_family(suffix), set()),
+        )
+        product = None
+        if product_decision.get("decision") != HUMAN_REQUIRED:
+            product = retain_decision(product_decision)
+        elif amount:
+            chosen = product_decision
+            if store_decision and (store_decision.get("candidate") or store_decision.get("alternatives")) and not (
+                product_decision.get("candidate") or product_decision.get("alternatives")
+            ):
+                chosen = store_decision
+            retain_decision(
+                chosen,
+                gate_type="HG-01",
+                context={"store": raw_store, "source_product": suffix, "amount": cents_text(amount)},
+            )
+        if product and amount:
+            components[product].insert(0, {"cents": amount, "source_file": financial["source_name"], "kind": "financial_single_store", "store": raw_store})
+
+    for campaign in regular:
+        regular_families = sorted({alias_family(item["plan"]) for item in campaign["records"] if item["cost_cents"] and alias_family(item["plan"])})
+        regular_store_token = "regular_store:" + hashlib.sha256(json.dumps(regular_families, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+        assigned_store = run_mappings.get(f"campaign:{norm(regular_store_token)}") or memory.resolve("campaign", regular_store_token)
+        assigned_store = resolve_store(assigned_store or "", group_names, memory, run_mappings) if assigned_store else None
+        provisional: list[dict[str, Any]] = []
         for record in campaign["records"]:
             plan = record["plan"]
             generic = norm(plan) in {"单盒", "三盒", "1", "3", "一盒", "3盒", "1盒"}
-            resolved = None if generic else resolve_product(plan, products, memory, run_mappings)
-            provisional.append((record, generic, resolved))
-            if resolved and record["cost_cents"]:
-                non_generic_products.add(resolved)
-            elif record["cost_cents"] and not generic:
-                candidate = {"entity_type": "campaign", "source": plan, "target": None}
-                stripped = strip_campaign_spec(plan)
-                likely = [p for p in products if norm(stripped) and (norm(stripped) in norm(p) or norm(p) in norm(stripped))]
-                if len(likely) == 1:
-                    candidate["target"] = likely[0]
-                gates.append(make_gate(
-                    "HG-06", "Nonzero campaign cannot be uniquely attributed", {"file": campaign["name"], "row": record["row"], "campaign": plan, "amount": cents_text(record["cost_cents"])},
-                    f"非零计划“{plan}”（{cents_text(record['cost_cents'])}）应归属哪个模板产品？",
-                    candidate=candidate,
-                    persistence=candidate,
-                ))
+            decision = None
+            if not generic and record["cost_cents"]:
+                decision = resolve_product_evidence(
+                    plan,
+                    template,
+                    memory,
+                    run_mappings,
+                    identity_value=record.get("sku", ""),
+                    sibling_sources=sibling_plans.get(alias_family(plan), []),
+                    cross_file_targets=cross_file_hints.get(alias_family(plan), set()),
+                )
+            provisional.append({"record": record, "generic": generic, "decision": decision})
         if campaign["total_cents"] == 0:
-            # Zero-only detail cannot affect accounting and often contains a
-            # broad dormant campaign catalog.  Do not infer its store.
             continue
-        candidates = [store for store, members in group_products.items() if non_generic_products and non_generic_products.issubset(members)]
-        if len(candidates) != 1:
-            if campaign["total_cents"]:
-                gates.append(make_gate(
-                    "HG-06", "Campaign detail file cannot be uniquely assigned to a store", {"file": campaign["name"], "resolved_products": sorted(non_generic_products), "candidate_stores": candidates, "amount": cents_text(campaign["total_cents"])},
-                    f"明细文件 {campaign['name']} 无法唯一归属店铺，请确认。",
-                ))
+
+        first_products = {
+            str(item["decision"].get("candidate"))
+            for item in provisional
+            if item["decision"] and item["decision"].get("decision") != HUMAN_REQUIRED and item["record"]["cost_cents"]
+        }
+        candidates = [store for store, members in group_products.items() if first_products and first_products.issubset(members)]
+        reconciled_candidates = [
+            store for store in candidates
+            if canonical_ledger.get(store, {}).get("amount_cents") == campaign["total_cents"]
+        ]
+        store = assigned_store or (candidates[0] if len(candidates) == 1 else (reconciled_candidates[0] if len(reconciled_candidates) == 1 else None))
+        if store:
+            reconciliation = {
+                "status": "PASS",
+                "store": store,
+                "ledger_total_cents": canonical_ledger.get(store, {}).get("amount_cents"),
+                "detail_total_cents": campaign["total_cents"],
+            } if canonical_ledger.get(store, {}).get("amount_cents") == campaign["total_cents"] else {"status": "NOT_TESTED"}
+            for item in provisional:
+                if item["generic"] or not item["decision"] or item["decision"].get("decision") != HUMAN_REQUIRED:
+                    continue
+                plan = item["record"]["plan"]
+                item["decision"] = resolve_product_evidence(
+                    plan,
+                    template,
+                    memory,
+                    run_mappings,
+                    identity_value=item["record"].get("sku", ""),
+                    context_products=group_products.get(store, set()),
+                    sibling_sources=sibling_plans.get(alias_family(plan), []),
+                    cross_file_targets=cross_file_hints.get(alias_family(plan), set()),
+                    reconciliation=reconciliation,
+                )
+
+        unresolved_rows = []
+        non_generic_products: set[str] = set()
+        for item in provisional:
+            if item["generic"] or not item["decision"]:
+                continue
+            record = item["record"]
+            decision = item["decision"]
+            if decision.get("decision") == HUMAN_REQUIRED:
+                decision["entity_type"] = "campaign"
+                decision["fact_family"] = f"campaign:{alias_family(record['plan'])}"
+                if record["cost_cents"]:
+                    unresolved_rows.append(item)
+                    retain_decision(
+                        decision,
+                        gate_type="HG-06",
+                        context={"file": campaign["name"], "row": record["row"], "campaign": record["plan"], "amount": cents_text(record["cost_cents"])},
+                    )
+            else:
+                product = retain_decision(decision, mapping_type="campaign", fact_family=f"campaign:{alias_family(record['plan'])}")
+                if product and record["cost_cents"]:
+                    non_generic_products.add(product)
+        if unresolved_rows:
             continue
-        store = candidates[0]
+
+        candidates = [store_name for store_name, members in group_products.items() if non_generic_products and non_generic_products.issubset(members)]
+        reconciled_candidates = [
+            store_name for store_name in candidates
+            if canonical_ledger.get(store_name, {}).get("amount_cents") == campaign["total_cents"]
+        ]
+        store = store or (candidates[0] if len(candidates) == 1 else (reconciled_candidates[0] if len(reconciled_candidates) == 1 else None))
+        if not store:
+            decision = resolve_entity(campaign["name"], group_names, entity_type="store", context_candidates=candidates)
+            decision["fact_family"] = f"store-file:{norm(campaign['name'])}"
+            decision["alternatives"] = candidates
+            decision["entity_type"] = "campaign"
+            decision["mapping_sources"] = [regular_store_token]
+            decision["target_kind"] = "store"
+            retain_decision(
+                decision,
+                gate_type="HG-06",
+                context={"file": campaign["name"], "resolved_products": sorted(non_generic_products), "candidate_stores": candidates, "amount": cents_text(campaign["total_cents"])},
+            )
+            continue
+        store_decision = resolve_entity(
+            campaign["name"],
+            group_names,
+            entity_type="store",
+            exact_matches=[(store, "unique_store_product_membership", {"products": sorted(non_generic_products)})],
+            reconciliation={
+                "status": "PASS" if canonical_ledger.get(store, {}).get("amount_cents") == campaign["total_cents"] else "NOT_TESTED",
+                "store": store,
+            },
+        )
+        retain_decision(store_decision)
         detailed_stores.add(store)
         split = defaultdict(int)
-        main_product = _main_store_product(store, products, memory, run_mappings)
-        for record, generic, resolved in provisional:
-            if generic:
-                resolved = main_product
+        generic_nonzero = [item for item in provisional if item["generic"] and item["record"]["cost_cents"]]
+        main_decision = None
+        main_product = None
+        if generic_nonzero:
+            suffix = re.split(r"[-—]", store)[-1].strip()
+            main_decision = resolve_product_evidence(
+                suffix,
+                template,
+                memory,
+                run_mappings,
+                context_products=group_products.get(store, set()),
+                cross_file_targets=cross_file_hints.get(alias_family(suffix), set()),
+            )
+            main_decision["fact_family"] = f"product:store-main:{norm(store)}"
+            main_product = retain_decision(
+                main_decision,
+                gate_type="HG-06",
+                context={"store": store, "generic_plans": [item["record"]["plan"] for item in generic_nonzero]},
+            )
+            if not main_product:
+                continue
+        for item in provisional:
+            record = item["record"]
+            resolved = None
+            if item["generic"]:
+                if not record["cost_cents"]:
+                    continue
+                generic_decision = resolve_entity(
+                    record["plan"],
+                    products,
+                    entity_type="campaign",
+                    exact_matches=[(main_product, "generic_plan_to_unique_store_main_product", {"store": store})],
+                )
+                resolved = retain_decision(generic_decision, mapping_type="campaign", fact_family=f"campaign:{norm(store)}:generic-main")
+            elif item["decision"]:
+                resolved = str(item["decision"].get("candidate") or "")
             if not resolved:
-                if record["cost_cents"]:
-                    gates.append(make_gate(
-                        "HG-06", "Generic nonzero campaign has no resolved store main product", {"file": campaign["name"], "row": record["row"], "campaign": record["plan"], "store": store, "amount": cents_text(record["cost_cents"])},
-                        f"店铺 {store} 的计划“{record['plan']}”应归属哪个产品？",
-                    ))
                 continue
             split[resolved] += record["cost_cents"]
             if record["cost_cents"]:
                 component = {"cents": record["cost_cents"], "source_file": campaign["name"], "row": record["row"], "kind": "campaign_regular", "store": store, "plan": record["plan"], "record_id": record["record_id"]}
                 components[resolved].append(component)
                 audit_campaign_records.append({**record, "resolved_product": resolved, "source_kind": campaign["kind"], "source_file": campaign["name"], "date": target_date})
-        store_splits[store] = {"detail_files": [campaign["name"]], "products": dict(split), "split_total_cents": sum(split.values())}
+        merge_store_split(store, campaign["name"], dict(split))
 
     for campaign in full_store:
         source_token = "full_store_export"
         assigned = run_mappings.get(f"campaign:{norm(source_token)}") or memory.resolve("campaign", source_token)
         store = resolve_store(assigned or "", group_names, memory, run_mappings) if assigned else None
-        if not store and campaign["total_cents"]:
-            gates.append(make_gate(
-                "HG-06", "Full-store export has no account field and no confirmed local attribution", {"file": campaign["name"], "amount": cents_text(campaign["total_cents"]), "schema": "full_store_sku_export"},
-                "该全店推广导出属于哪个模板店铺？",
-                candidate={"entity_type": "campaign", "source": source_token, "target": None},
-                persistence={"entity_type": "campaign", "source": source_token, "target": None},
-            ))
-            continue
         split = defaultdict(int)
+        record_decisions = []
         for record in campaign["records"]:
-            resolved = template.get("sku", {}).get("map", {}).get(record["sku"], {}).get("product")
-            if not resolved:
-                resolved = resolve_product(record["sku"], products, memory, run_mappings)
-            if not resolved and record["cost_cents"]:
-                gates.append(make_gate(
-                    "HG-05", "Template-external nonzero SKU in campaign expense", {"file": campaign["name"], "row": record["row"], "sku": record["sku"], "amount": cents_text(record["cost_cents"])},
-                    f"全店推广存在模板外非零 SKU {record['sku']}，请确认归属。",
-                    candidate={"entity_type": "sku", "source": record["sku"], "target": None},
-                    persistence={"entity_type": "sku", "source": record["sku"], "target": None},
-                ))
-                continue
-            if not resolved:
+            source = record.get("sku") or record.get("plan") or ""
+            decision = resolve_product_evidence(
+                source,
+                template,
+                memory,
+                run_mappings,
+                identity_value=record.get("sku", ""),
+                sibling_sources=sibling_plans.get(alias_family(record.get("plan")), []),
+                cross_file_targets=cross_file_hints.get(alias_family(record.get("plan")), set()),
+            )
+            decision["entity_type"] = "sku"
+            decision["fact_family"] = f"sku:{norm(source)}"
+            record_decisions.append((record, decision))
+        unresolved = [item for item in record_decisions if item[0]["cost_cents"] and item[1].get("decision") == HUMAN_REQUIRED]
+        for record, decision in record_decisions:
+            resolved = retain_decision(
+                decision,
+                gate_type="HG-05" if record["cost_cents"] and decision.get("decision") == HUMAN_REQUIRED else None,
+                context={"file": campaign["name"], "row": record["row"], "sku": record.get("sku"), "amount": cents_text(record["cost_cents"])} if record["cost_cents"] else None,
+            )
+            if not resolved or not record["cost_cents"]:
                 continue
             split[resolved] += record["cost_cents"]
-            if record["cost_cents"]:
+        if unresolved:
+            continue
+        resolved_products = set(split)
+        if not store:
+            candidates = [store_name for store_name, members in group_products.items() if resolved_products and resolved_products.issubset(members)]
+            reconciled_candidates = [
+                store_name for store_name in candidates
+                if canonical_ledger.get(store_name, {}).get("amount_cents") == campaign["total_cents"]
+            ]
+            store = candidates[0] if len(candidates) == 1 else (reconciled_candidates[0] if len(reconciled_candidates) == 1 else None)
+            if store:
+                decision = resolve_entity(
+                    source_token,
+                    group_names,
+                    entity_type="store",
+                    exact_matches=[(store, "unique_store_product_membership", {"products": sorted(resolved_products)})],
+                    reconciliation={"status": "PASS" if store in reconciled_candidates else "NOT_TESTED", "store": store},
+                )
+                retain_decision(decision)
+            elif campaign["total_cents"]:
+                decision = resolve_entity(source_token, group_names, entity_type="store", context_candidates=candidates)
+                decision["entity_type"] = "campaign"
+                decision["fact_family"] = f"campaign:{source_token}"
+                decision["alternatives"] = candidates
+                decision["target_kind"] = "store"
+                retain_decision(
+                    decision,
+                    gate_type="HG-06",
+                    context={"file": campaign["name"], "amount": cents_text(campaign["total_cents"]), "schema": "full_store_identity_export", "resolved_products": sorted(resolved_products)},
+                )
+                continue
+        if store:
+            detailed_stores.add(store)
+            for record, decision in record_decisions:
+                resolved = str(decision.get("candidate") or "")
+                if not resolved or not record["cost_cents"]:
+                    continue
                 component = {"cents": record["cost_cents"], "source_file": campaign["name"], "row": record["row"], "kind": "campaign_full_store", "store": store, "sku": record["sku"]}
                 components[resolved].append(component)
                 audit_campaign_records.append({**record, "resolved_product": resolved, "source_kind": campaign["kind"], "source_file": campaign["name"], "date": target_date})
-        if store:
-            detailed_stores.add(store)
-            store_splits[store] = {"detail_files": [campaign["name"]], "products": dict(split), "split_total_cents": sum(split.values())}
+            merge_store_split(store, campaign["name"], dict(split))
 
     proven, suspected = classify_duplicate_records(audit_campaign_records)
     duplicate_record_keys = {(item["duplicate"]["source_file"], item["duplicate"]["row"]) for item in proven}
@@ -858,31 +1219,12 @@ def build_golden_payload(
             "这两条消费记录相似但无法证明是同一底层事件。请确认是否重复。",
         ))
 
-    canonical_ledger: dict[str, tuple[str, int]] = {}
-    for raw_store, amount in ledger_by_store.items():
-        canonical = resolve_store(raw_store, group_names, memory, run_mappings)
-        if canonical:
-            canonical_ledger[canonical] = (raw_store, amount)
-            continue
-        suffix = re.split(r"[-—]", raw_store)[-1].strip()
-        product = resolve_product(suffix, products, memory, run_mappings)
-        if not product and amount:
-            likely = [p for p in products if norm(suffix) and (norm(suffix) in norm(p) or norm(p) in norm(suffix))]
-            candidate = {"entity_type": "product", "source": suffix, "target": likely[0] if len(likely) == 1 else None}
-            gates.append(make_gate(
-                "HG-01", "Nonzero ledger store cannot be uniquely mapped to a template product", {"store": raw_store, "source_product": suffix, "amount": cents_text(amount)},
-                f"店铺“{raw_store}”（{cents_text(amount)}）对应哪个模板产品？",
-                candidate=candidate,
-                persistence=candidate,
-            ))
-            continue
-        if product and amount:
-            components[product].insert(0, {"cents": amount, "source_file": financial["source_name"], "kind": "financial_single_store", "store": raw_store})
-
-    mapping_blocked = any(item["gate_type"] in {"HG-01", "HG-03", "HG-05", "HG-06"} for item in gates)
+    mapping_blocked = bool(unresolved_decisions) or any(item["gate_type"] in {"HG-01", "HG-03", "HG-05", "HG-06"} for item in gates)
     reconciliations = []
     for store in group_names:
-        raw_store, ledger_amount = canonical_ledger.get(store, (store, 0))
+        ledger = canonical_ledger.get(store, {"raw_stores": [store], "amount_cents": 0})
+        raw_store = " / ".join(ledger["raw_stores"])
+        ledger_amount = ledger["amount_cents"]
         split = store_splits.get(store, {"products": {}, "split_total_cents": 0, "detail_files": []})
         difference = split["split_total_cents"] - ledger_amount
         reconciliations.append({
@@ -926,17 +1268,17 @@ def build_golden_payload(
             source_total += record["amount_cents"]
             mapped = sku_map.get(record["sku"])
             if not mapped:
-                confirmed_product = resolve_product(record["sku"], products, memory, run_mappings)
+                decision = resolve_product_evidence(record["sku"], template, memory, run_mappings, identity_value=record["sku"])
+                decision["entity_type"] = "sku"
+                decision["fact_family"] = f"sku:{norm(record['sku'])}"
+                confirmed_product = retain_decision(
+                    decision,
+                    gate_type="HG-05" if record["amount_cents"] and decision.get("decision") == HUMAN_REQUIRED else None,
+                    context={"row": record["row"], "sku": record["sku"], "amount": cents_text(record["amount_cents"])} if record["amount_cents"] else None,
+                )
                 if confirmed_product:
                     mapped = {"product": confirmed_product, "spec": "other"}
             if not mapped:
-                if record["amount_cents"]:
-                    gates.append(make_gate(
-                        "HG-05", "Template-external sales SKU has nonzero amount", {"sku": record["sku"], "row": record["row"], "amount": cents_text(record["amount_cents"])},
-                        f"销售文件中模板外 SKU {record['sku']} 有非零金额 {cents_text(record['amount_cents'])}，请确认归属。",
-                        candidate={"entity_type": "sku", "source": record["sku"], "target": None},
-                        persistence={"entity_type": "sku", "source": record["sku"], "target": None},
-                    ))
                 continue
             spec = mapped.get("spec") if mapped.get("spec") in {"single", "triple"} else "other"
             by_product[mapped["product"]][spec].append(record["amount_cents"])
@@ -970,6 +1312,11 @@ def build_golden_payload(
             }
         sales_audit = {"reported_cents": sales["reported_cents"], "sku_sum_cents": source_total, "matched_count": len(template_skus & source_skus), "expected_template_sku_count": len(template_skus), "external_skus": sorted(source_skus - template_skus), "missing_skus": missing}
 
+    for decision in merge_human_decisions(unresolved_decisions):
+        gate_types = set(decision.get("gate_types", []))
+        gate_type = "HG-05" if "HG-05" in gate_types else ("HG-01" if "HG-01" in gate_types else "HG-06")
+        gates.append(resolution_gate(decision, gate_type, context={"occurrences": decision.get("contexts", [])}))
+
     payload = {
         "schema_version": 1,
         "target_date": target_date,
@@ -988,6 +1335,12 @@ def build_golden_payload(
         "proven_duplicates": [{"evidence": item["evidence"], "source_file": item["duplicate"]["source_file"], "row": item["duplicate"]["row"]} for item in proven],
         "suspected_duplicates": len(suspected),
         "sales": sales_audit,
+        "resolutions": resolutions,
+        "resolution_summary": {
+            "verified": sum(item.get("decision") == VERIFIED for item in resolutions),
+            "machine_inferred": sum(item.get("decision") == MACHINE_INFERRED for item in resolutions),
+            "human_required": len(merge_human_decisions(unresolved_decisions)),
+        },
     }
     return payload, audit, gates
 
@@ -1215,10 +1568,14 @@ def resolve_gate(
     if "entity_type" in candidate:
         if not candidate.get("target"):
             raise DailyRoiError("Mapping resolution requires a target")
-        mapping_key = f"{candidate['entity_type']}:{norm(candidate['source'])}"
-        state.setdefault("run_mappings", {})[mapping_key] = candidate["target"]
-        if persistence == "PERSISTENT_REUSABLE":
-            LocalMemory(paths).add_mapping(candidate["entity_type"], candidate["source"], candidate["target"], gate_id=gate_id)
+        sources = [str(item) for item in (candidate.get("sources") or [candidate.get("source")]) if str(item or "").strip()]
+        if not sources:
+            raise DailyRoiError("Mapping resolution requires at least one source")
+        for source in sources:
+            mapping_key = f"{candidate['entity_type']}:{norm(source)}"
+            state.setdefault("run_mappings", {})[mapping_key] = candidate["target"]
+            if persistence == "PERSISTENT_REUSABLE":
+                LocalMemory(paths).add_mapping(candidate["entity_type"], source, candidate["target"], gate_id=gate_id)
     elif candidate.get("rule"):
         state.setdefault("run_mappings", {})[f"workflow:{candidate['rule']}"] = "confirmed"
         if persistence == "PERSISTENT_REUSABLE":

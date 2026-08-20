@@ -66,7 +66,8 @@ class HumanGateEvalSuite(unittest.TestCase):
             self.assertEqual([gate["gate_type"] for gate in gates], ["HG-01"])
             self.assertEqual(gates[0]["status"], "HUMAN_REQUIRED")
             self.assertEqual(gates[0]["candidate_resolution"]["source"], "来源产品")
-            self.assertIsNone(gates[0]["candidate_resolution"]["target"])
+            self.assertEqual(gates[0]["candidate_resolution"]["target"], "标准产品")
+            self.assertEqual(gates[0]["evidence"]["resolution"]["decision"], "HUMAN_REQUIRED")
 
     def test_eval_b_confirm_persist_and_resume(self):
         with tempfile.TemporaryDirectory() as root:

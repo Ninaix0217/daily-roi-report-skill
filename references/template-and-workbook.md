@@ -7,11 +7,13 @@ The workbook worker discovers at runtime:
 - sheet names and workbook order;
 - the report table from semantic headers;
 - product rows, total row, date cell, writable cost/sales/ROI cells, and existing formula precedent;
-- SKU-to-product relationships and SKU specification order;
+- SKU-to-product relationships, SKU specification order, and conflicting duplicate SKU assignments;
 - store/product group structures on supporting sheets;
 - merged cells, widths, heights, and style/layout fingerprints.
 
 No sheet name, range, product count, SKU count, product order, or store set is a production constant.
+
+An exact SKU/item ID is `VERIFIED` only when the TemplateModel maps it to one product. The same identifier assigned to different template products is an explicit contradiction and requires resolution before writing.
 
 ## Protected write
 

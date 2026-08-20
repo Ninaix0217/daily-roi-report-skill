@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/daily-roi/evidence-resolution.schema.json",
+  "title": "Daily ROI Evidence Resolution v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "entity_type", "source", "sources", "fact_family", "candidate", "decision", "evidence", "contradictions", "alternatives", "reconciliation"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entity_type": { "enum": ["store", "product", "campaign", "sku"] },
+    "source": { "type": "string" },
+    "sources": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+    "fact_family": { "type": "string", "minLength": 1 },
+    "candidate": { "type": ["string", "null"] },
+    "decision": { "enum": ["VERIFIED", "MACHINE_INFERRED", "HUMAN_REQUIRED"] },
+    "evidence": { "type": "array", "items": { "type": "object" } },
+    "contradictions": { "type": "array", "items": { "type": "object" } },
+    "alternatives": { "type": "array", "items": { "type": "string" } },
+    "reconciliation": {
+      "type": "object",
+      "required": ["status"],
+      "properties": { "status": { "enum": ["PASS", "FAIL", "NOT_TESTED"] } }
+    }
+  }
+}
