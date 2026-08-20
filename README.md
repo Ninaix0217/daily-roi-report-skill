@@ -65,7 +65,7 @@ Install LibreOffice through the employee's normal IT process, then rerun. The Sk
 
 In the employee's clean workspace, ask Codex to use `$daily-roi-report-skill`, then provide the `input/` and `output/` locations. The Skill performs discovery, dependency preflight, reconciliation, protected writing, deterministic verification, and sheet rendering.
 
-On a first run, the Skill first attempts deterministic identity, template structure, semantic/context corroboration, contradiction checks, and reconciliation. Only a nonzero fact that remains genuinely ambiguous produces a structured Human Gate. Related aliases are grouped into one business question. After confirmation, Codex classifies the answer as reusable or run-only, records it, and resumes the same run. A reusable confirmation is automatically applied in later runs in that same workspace.
+On a first run, the Skill first attempts deterministic identity, template structure, semantic/context corroboration, contradiction checks, and reconciliation. Strong identity facts are verified automatically. A unique evidence-backed inference is proposed in one batch for quick accept/correct review; only a fact that remains genuinely ambiguous produces an open Human Gate. Accepted or corrected reusable mappings are remembered and automatically applied in later runs in that same workspace.
 
 For direct CLI use:
 
@@ -73,7 +73,7 @@ For direct CLI use:
 python scripts/daily_roi.py run --workspace <WORKSPACE> --input-dir <INPUT_DIR> --output-dir <OUTPUT_DIR> --node <NODE> --node-modules <NODE_MODULES>
 ```
 
-Use `status`, `memory`, and `resolve` subcommands to inspect or resume a run.
+Use `status`, `memory`, `review`, and `resolve` subcommands to inspect or resume a run. `review --accept-all` approves a complete run-only review batch; `review --responses-json <file>` handles mixed accepts, rejections, and corrections in one resume.
 
 ## Local memory
 

@@ -21,10 +21,12 @@ from xml.etree import ElementTree as ET
 
 from evidence_resolution import (
     HUMAN_REQUIRED,
-    MACHINE_INFERRED,
+    INFERRED_REVIEW,
     VERIFIED,
     alias_family,
+    finalize_resolution,
     merge_human_decisions,
+    merge_inferred_decisions,
     resolve_entity,
     resolve_global_store_constraints,
 )
@@ -661,6 +663,89 @@ def resolution_gate(decision: dict[str, Any], gate_type: str, *, context: dict[s
     )
 
 
+def review_decision_key(decision: dict[str, Any]) -> str:
+    identity = {
+        "entity_type": decision.get("entity_type"),
+        "sources": sorted(str(item) for item in (decision.get("sources") or [decision.get("source")]) if item),
+        "candidate": decision.get("candidate"),
+    }
+    stable = json.dumps(identity, ensure_ascii=False, sort_keys=True)
+    return "review:" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
+
+
+def _review_evidence_summary(decision: dict[str, Any]) -> list[str]:
+    classes = set(decision.get("evidence_classes") or [])
+    lines = []
+    if "SEMANTIC_EVIDENCE" in classes:
+        lines.append("名称语义和规格归一化共同支持该产品")
+    if "DETERMINISTIC_STRUCTURE" in classes:
+        lines.append("当前模板或店铺结构把候选范围限定到该结果")
+    if "CROSS_FILE_EVIDENCE" in classes:
+        lines.append("其他当前源文件提供了相互印证")
+    if "GLOBAL_RECONCILIATION" in classes:
+        lines.append("该归属是当前完整费用约束的唯一零差额解")
+    if "EXCLUSIVITY_EVIDENCE" in classes:
+        lines.append("没有发现同时满足全部约束的其他合理候选")
+    reconciliation = decision.get("reconciliation_result") or decision.get("reconciliation") or {}
+    if reconciliation.get("status") == "PASS" and not any("零差额" in line for line in lines):
+        lines.append("归属后的对账结果通过")
+    return lines or ["多项当前运行证据形成唯一首选答案，但不构成强身份事实"]
+
+
+def make_review_batch(decisions: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    items = []
+    for index, decision in enumerate(merge_inferred_decisions(decisions), 1):
+        sources = list(decision.get("sources") or [decision.get("source")])
+        proposal = str(decision.get("candidate") or "")
+        member_keys = [review_decision_key(item) for item in decision.get("member_decisions", [])] or [review_decision_key(decision)]
+        stable = json.dumps([sources, proposal, member_keys], ensure_ascii=False, sort_keys=True)
+        review_id = "RV-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:10]
+        evidence_types = {str(item.get("type") or "") for item in decision.get("supporting_evidence", [])}
+        global_inference = "global_constraint_unique_solution" in evidence_types
+        mapping_sources = list(decision.get("mapping_sources") or sources)
+        persistence = None if global_inference else {
+            "entity_type": decision.get("entity_type"),
+            "sources": mapping_sources,
+            "target": proposal,
+        }
+        resolution_candidate = {
+            "entity_type": decision.get("entity_type"),
+            "sources": mapping_sources,
+            "target": proposal,
+            "target_kind": decision.get("target_kind") or ("store" if decision.get("entity_type") == "store" else "product"),
+        }
+        items.append({
+            "number": index,
+            "review_id": review_id,
+            "status": "PENDING",
+            "sources": sources,
+            "proposed_answer": proposal,
+            "decision_type": INFERRED_REVIEW,
+            "evidence_classes": decision.get("evidence_classes", []),
+            "evidence_summary": _review_evidence_summary(decision),
+            "supporting_evidence": decision.get("supporting_evidence", []),
+            "contradictions_checked": decision.get("contradictions_checked"),
+            "alternatives": decision.get("alternatives", []),
+            "reconciliation_result": decision.get("reconciliation_result"),
+            "reason": decision.get("reason"),
+            "review_risk": decision.get("review_risk"),
+            "human_review_required": True,
+            "question": f"我判断：“{'、'.join(sources)}” → “{proposal}”。是否接受？",
+            "resolution_candidate": resolution_candidate,
+            "persistence_candidate": persistence,
+            "member_keys": member_keys,
+        })
+    if not items:
+        return None
+    stable = json.dumps([item["review_id"] for item in items], sort_keys=True)
+    return {
+        "batch_id": "RB-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:10],
+        "status": "INFERRED_REVIEW",
+        "instructions": "可回复“全部接受”，或按编号接受、拒绝、改为实际答案。",
+        "items": items,
+    }
+
+
 def filename_date_evidence(path: Path, internal_dates: set[str]) -> tuple[set[str], str]:
     if internal_dates:
         return internal_dates, "internal"
@@ -953,6 +1038,7 @@ def build_golden_payload(
     gates: list[dict[str, Any]] = []
     resolutions: list[dict[str, Any]] = []
     unresolved_decisions: list[dict[str, Any]] = []
+    review_decisions: list[dict[str, Any]] = []
     products = [item["name"] for item in template["report"]["products"]]
     raw_groups = template.get("store_groups", [])
     group_names = [item["store"] for item in raw_groups]
@@ -975,10 +1061,25 @@ def build_golden_payload(
             item["gate_type"] = gate_type
         if context:
             item["contexts"] = [context]
+        item = finalize_resolution(item)
+        review_state = run_mappings.get(review_decision_key(item))
+        if item.get("decision") == INFERRED_REVIEW and review_state == "accepted":
+            item["evidence"] = [*item.get("evidence", []), {"type": "human_confirmed_review"}]
+            item["decision"] = VERIFIED
+            item = finalize_resolution(item)
+        elif item.get("decision") == INFERRED_REVIEW and review_state == "rejected":
+            rejected = str(item.get("candidate") or "")
+            item["contradictions"] = [*item.get("contradictions", []), {"type": "human_rejected_proposal", "proposal": rejected}]
+            item["alternatives"] = list(dict.fromkeys([*item.get("alternatives", []), rejected]))
+            item["candidate"] = None
+            item["decision"] = HUMAN_REQUIRED
+            item = finalize_resolution(item)
         resolutions.append(item)
         if item.get("decision") == HUMAN_REQUIRED:
             unresolved_decisions.append(item)
             return None
+        if item.get("decision") == INFERRED_REVIEW:
+            review_decisions.append(item)
         return str(item.get("candidate") or "") or None
 
     def merge_store_split(store: str, file_name: str, split: dict[str, int]) -> None:
@@ -1167,6 +1268,12 @@ def build_golden_payload(
             continue
         store = assigned_store or global_store
         if global_store_decision and not assigned_store:
+            global_store_decision = dict(global_store_decision)
+            global_store_decision.update(
+                entity_type="campaign",
+                mapping_sources=[regular_store_token],
+                target_kind="store",
+            )
             retain_decision(global_store_decision)
         provisional: list[dict[str, Any]] = []
         scoped_products = group_products.get(store, set()) if store else set()
@@ -1352,6 +1459,12 @@ def build_golden_payload(
             continue
         store = assigned_store or global_store
         if global_store_decision and not assigned_store:
+            global_store_decision = dict(global_store_decision)
+            global_store_decision.update(
+                entity_type="campaign",
+                mapping_sources=[source_token],
+                target_kind="store",
+            )
             retain_decision(global_store_decision)
         split = defaultdict(int)
         record_decisions = []
@@ -1545,6 +1658,8 @@ def build_golden_payload(
         "sales": sales_payload,
         "roi_number_format": "0.00",
     }
+    review_batch = make_review_batch(review_decisions)
+    merged_human = merge_human_decisions(unresolved_decisions)
     audit = {
         "target_date": target_date,
         "financial_total_cents": ledger_total,
@@ -1555,10 +1670,16 @@ def build_golden_payload(
         "suspected_duplicates": len(suspected),
         "sales": sales_audit,
         "resolutions": resolutions,
+        "review_batch": review_batch,
         "resolution_summary": {
             "verified": sum(item.get("decision") == VERIFIED for item in resolutions),
-            "machine_inferred": sum(item.get("decision") == MACHINE_INFERRED for item in resolutions),
-            "human_required": len(merge_human_decisions(unresolved_decisions)),
+            "machine_inferred": 0,
+            "inferred_review": len((review_batch or {}).get("items", [])),
+            "human_required": len(merged_human),
+            "verified_count": sum(item.get("decision") == VERIFIED for item in resolutions),
+            "inferred_review_count": len((review_batch or {}).get("items", [])),
+            "human_required_count": len(merged_human),
+            "open_ended_human_decisions": len(merged_human),
         },
     }
     return payload, audit, gates
@@ -1674,13 +1795,47 @@ def run_report(
         )
         payload, audit = computed_payload, computed_audit
         gates.extend(computed_gates)
+        template_date = templates[0]["report"].get("template_date")
+        if template_date != target_date and not date_gates:
+            date_decision = finalize_resolution({
+                "schema_version": 1,
+                "entity_type": "workflow",
+                "source": str(template_date or ""),
+                "sources": [str(template_date or "")],
+                "fact_family": f"workflow:{WORKFLOW_RULE_STALE_TEMPLATE}",
+                "candidate": target_date,
+                "decision": VERIFIED,
+                "evidence": [
+                    {"type": "consistent_business_dates_template_only_stale", "business_date": target_date, "template_date": template_date},
+                    {"type": "human_confirmed_workflow_rule", "rule": WORKFLOW_RULE_STALE_TEMPLATE},
+                ],
+                "contradictions": [],
+                "alternatives": [],
+                "candidate_generation": [],
+                "reconciliation": {"status": "PASS", "source_dates": business_dates},
+            })
+            audit["resolutions"].append(date_decision)
+            audit["resolution_summary"]["verified"] += 1
+            audit["resolution_summary"]["verified_count"] += 1
 
     unique_gates = {gate["gate_id"]: gate for gate in gates}
+    review_batch = (audit or {}).get("review_batch")
+    pending_reviews = list((review_batch or {}).get("items", []))
+    if unique_gates:
+        run_status = "HUMAN_REQUIRED"
+    elif pending_reviews:
+        run_status = "INFERRED_REVIEW"
+    else:
+        run_status = "READY_TO_WRITE"
+    review_metrics = dict((existing_state or {}).get("review_metrics") or {})
+    review_metrics.setdefault("review_accept_count", 0)
+    review_metrics.setdefault("review_reject_count", 0)
+    review_metrics.setdefault("review_correct_count", 0)
     state = {
         "schema_version": 1,
         "run_id": run_id,
-        "status": "HUMAN_REQUIRED" if unique_gates else "READY_TO_WRITE",
-        "stage": "RESOLVE" if unique_gates else "RECONCILE",
+        "status": run_status,
+        "stage": "RESOLVE" if unique_gates or pending_reviews else "RECONCILE",
         "created_at": (existing_state or {}).get("created_at", now_iso()),
         "updated_at": now_iso(),
         "workspace": str(paths.workspace),
@@ -1698,6 +1853,8 @@ def run_report(
         "template_model": templates[0] if len(templates) == 1 else None,
         "exact_duplicate_files": exact_duplicate_files,
         "gates": list(unique_gates.values()),
+        "review_batch": review_batch,
+        "review_metrics": review_metrics,
         "run_mappings": run_mappings,
         "audit": audit,
         "payload_path": None,
@@ -1706,8 +1863,11 @@ def run_report(
     }
     atomic_json(paths.current_run, state)
     atomic_json(run_dir / "manifest.json", manifest)
-    if unique_gates:
-        atomic_json(run_dir / "human-gates.json", list(unique_gates.values()))
+    if unique_gates or pending_reviews:
+        if unique_gates:
+            atomic_json(run_dir / "human-gates.json", list(unique_gates.values()))
+        if pending_reviews:
+            atomic_json(run_dir / "review-batch.json", review_batch)
         return state
     if payload is None or audit is None:
         raise DailyRoiError("Preflight did not produce a writable payload")
@@ -1803,6 +1963,157 @@ def resolve_gate(
         raise DailyRoiError("This gate has no structured resolution candidate; provide a supported mapping or rule")
     append_jsonl(paths.confirmations, {"gate_id": gate_id, "classification": persistence, "at": now_iso(), "resolution": candidate})
     state["gates"] = [item for item in state.get("gates", []) if item.get("gate_id") != gate_id]
+    state["updated_at"] = now_iso()
+    atomic_json(paths.current_run, state)
+    return run_report(
+        workspace,
+        Path(state["input_dir"]),
+        Path(state["output_dir"]),
+        node=node,
+        node_modules=node_modules,
+        existing_state=state,
+    )
+
+
+def resolve_review_batch(
+    workspace: Path,
+    responses: list[dict[str, Any]] | None = None,
+    *,
+    accept_all: bool = False,
+    default_persistence: str = "RUN_ONLY",
+    node: str | None = None,
+    node_modules: str | None = None,
+) -> dict[str, Any]:
+    """Apply one complete business review batch, persist once, and resume once."""
+    paths = RuntimePaths.for_workspace(workspace)
+    if not paths.current_run.exists():
+        raise DailyRoiError("No current run exists")
+    state = json.loads(paths.current_run.read_text(encoding="utf-8"))
+    batch = dict(state.get("review_batch") or {})
+    pending = {str(item.get("review_id")): item for item in batch.get("items", []) if item.get("status") == "PENDING"}
+    if not pending:
+        raise DailyRoiError("No pending inferred-review batch exists")
+    if default_persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
+        raise DailyRoiError(f"Invalid review persistence classification: {default_persistence}")
+    if accept_all:
+        normalized = [
+            {"review_id": review_id, "action": "ACCEPT", "persistence": default_persistence}
+            for review_id in pending
+        ]
+    else:
+        normalized = list(responses or [])
+    response_ids = [str(item.get("review_id") or "") for item in normalized]
+    if len(response_ids) != len(set(response_ids)):
+        raise DailyRoiError("Each review_id may appear only once")
+    missing = sorted(set(pending) - set(response_ids))
+    unknown = sorted(set(response_ids) - set(pending))
+    if missing or unknown:
+        raise DailyRoiError(f"Review batch must be resolved together; missing={missing}, unknown={unknown}")
+
+    memory = LocalMemory(paths)
+    planned_mappings: dict[tuple[str, str], str] = {}
+
+    def validate_target(item: dict[str, Any], target: str) -> None:
+        resolution = dict(item.get("resolution_candidate") or {})
+        template_model = state.get("template_model") or {}
+        target_kind = str(resolution.get("target_kind") or "product")
+        if target_kind == "store":
+            allowed_targets = [str(group.get("store") or "") for group in template_model.get("store_groups", [])]
+        else:
+            allowed_targets = [str(product.get("name") or "") for product in (template_model.get("report") or {}).get("products", [])]
+        if allowed_targets and norm(target) not in {norm(value) for value in allowed_targets}:
+            raise DailyRoiError(f"Review target is not present in the current TemplateModel: {target}")
+
+    # Validate the complete batch before mutating run state or durable memory.
+    for response in normalized:
+        review_id = str(response["review_id"])
+        item = pending[review_id]
+        action = str(response.get("action") or "").upper()
+        persistence = str(response.get("persistence") or default_persistence)
+        if action not in {"ACCEPT", "CORRECT", "REJECT"}:
+            raise DailyRoiError(f"Unsupported review action: {action}")
+        if persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
+            raise DailyRoiError(f"Invalid review persistence classification: {persistence}")
+        resolution = dict(item.get("resolution_candidate") or {})
+        entity_type = str(resolution.get("entity_type") or "")
+        sources = [str(value) for value in resolution.get("sources", []) if str(value or "").strip()]
+        target = str(item.get("proposed_answer") or "") if action == "ACCEPT" else str(response.get("target") or "").strip()
+        if action == "CORRECT" and not target:
+            raise DailyRoiError("CORRECT requires a non-empty target")
+        if action in {"ACCEPT", "CORRECT"}:
+            if not entity_type or not sources:
+                raise DailyRoiError("This review item has no structured resolution target")
+            validate_target(item, target)
+        if persistence == "PERSISTENT_REUSABLE" and action in {"ACCEPT", "CORRECT"}:
+            if not item.get("persistence_candidate"):
+                raise DailyRoiError("This inferred allocation is run-specific and is not eligible for durable memory")
+            for source in sources:
+                key = (entity_type, norm(source))
+                existing = memory.resolve(entity_type, source)
+                planned = planned_mappings.get(key)
+                if (existing and norm(existing) != norm(target)) or (planned and norm(planned) != norm(target)):
+                    raise DailyRoiError(f"Conflicting confirmed mapping for {source!r}")
+                planned_mappings[key] = target
+
+    metrics = dict(state.get("review_metrics") or {})
+    metrics.setdefault("review_accept_count", 0)
+    metrics.setdefault("review_reject_count", 0)
+    metrics.setdefault("review_correct_count", 0)
+    for response in normalized:
+        review_id = str(response["review_id"])
+        item = pending[review_id]
+        action = str(response.get("action") or "").upper()
+        persistence = str(response.get("persistence") or default_persistence)
+        if persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
+            raise DailyRoiError(f"Invalid review persistence classification: {persistence}")
+        proposal = str(item.get("proposed_answer") or "")
+        resolution = dict(item.get("resolution_candidate") or {})
+        mapping_sources = [str(value) for value in resolution.get("sources", []) if str(value or "").strip()]
+        entity_type = str(resolution.get("entity_type") or "")
+        confirmation = {
+            "review_id": review_id,
+            "batch_id": batch.get("batch_id"),
+            "decision_type": "HUMAN_CONFIRMED" if action in {"ACCEPT", "CORRECT"} else "REJECTED",
+            "action": action,
+            "proposal": proposal,
+            "at": now_iso(),
+        }
+        if action == "ACCEPT":
+            for key in item.get("member_keys", []):
+                state.setdefault("run_mappings", {})[str(key)] = "accepted"
+            durable = item.get("persistence_candidate")
+            if persistence == "PERSISTENT_REUSABLE":
+                if not durable:
+                    raise DailyRoiError("This inferred allocation is run-specific and is not eligible for durable memory")
+                for source in durable.get("sources", []):
+                    memory.add_mapping(str(durable["entity_type"]), str(source), proposal, gate_id=review_id)
+            metrics["review_accept_count"] += 1
+            confirmation.update(final_answer=proposal, classification=persistence, rejected=False)
+        elif action == "CORRECT":
+            target = str(response.get("target") or "").strip()
+            if not target:
+                raise DailyRoiError("CORRECT requires a non-empty target")
+            if not entity_type or not mapping_sources:
+                raise DailyRoiError("This review item has no structured correction target")
+            for source in mapping_sources:
+                state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = target
+                if persistence == "PERSISTENT_REUSABLE":
+                    if not item.get("persistence_candidate"):
+                        raise DailyRoiError("This inferred allocation is run-specific and is not eligible for durable memory")
+                    memory.add_mapping(entity_type, source, target, gate_id=review_id)
+            metrics["review_correct_count"] += 1
+            confirmation.update(final_answer=target, classification=persistence, rejected=True)
+        elif action == "REJECT":
+            for key in item.get("member_keys", []):
+                state.setdefault("run_mappings", {})[str(key)] = "rejected"
+            metrics["review_reject_count"] += 1
+            confirmation.update(final_answer=None, classification="RUN_ONLY", rejected=True)
+        else:
+            raise DailyRoiError(f"Unsupported review action: {action}")
+        append_jsonl(paths.confirmations, confirmation)
+
+    state["review_metrics"] = metrics
+    state["review_batch"] = None
     state["updated_at"] = now_iso()
     atomic_json(paths.current_run, state)
     return run_report(

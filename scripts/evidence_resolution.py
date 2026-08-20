@@ -6,8 +6,41 @@ from typing import Any, Iterable
 
 
 VERIFIED = "VERIFIED"
+INFERRED_REVIEW = "INFERRED_REVIEW"
 MACHINE_INFERRED = "MACHINE_INFERRED"
 HUMAN_REQUIRED = "HUMAN_REQUIRED"
+
+HARD_IDENTITY = "HARD_IDENTITY"
+DETERMINISTIC_STRUCTURE = "DETERMINISTIC_STRUCTURE"
+SEMANTIC_EVIDENCE = "SEMANTIC_EVIDENCE"
+CROSS_FILE_EVIDENCE = "CROSS_FILE_EVIDENCE"
+GLOBAL_RECONCILIATION = "GLOBAL_RECONCILIATION"
+EXCLUSIVITY_EVIDENCE = "EXCLUSIVITY_EVIDENCE"
+
+_HARD_IDENTITY_TYPES = {
+    "exact_template_sku", "exact_template_product_identity", "human_confirmed_local_mapping",
+    "confirmed_run_mapping", "human_confirmed_store_assignment", "human_confirmed_review",
+    "human_confirmed_workflow_rule", "conflicting_template_sku",
+}
+_DETERMINISTIC_STRUCTURE_TYPES = {
+    "exact_template_product", "exact_template_store", "exact_template_product_after_spec_normalization",
+    "unique_store_product_membership", "generic_plan_to_unique_store_main_product", "current_store_product_scope",
+    "consistent_business_dates_template_only_stale",
+}
+_SEMANTIC_TYPES = {
+    "normalized_exact_name", "product_form_root_exact", "normalized_containment", "short_semantic_stem",
+    "single_character_root_variant", "transposed_root_variant", "shared_semantic_anchor", "weak_shared_anchor",
+    "same_product_form", "shared_distinct_token", "unique_shared_token", "sibling_alias_family",
+}
+_CROSS_FILE_TYPES = {"cross_file_identity_corroboration", "current_run_evidence_only"}
+_GLOBAL_RECONCILIATION_TYPES = {
+    "global_constraint_unique_solution", "current_file_amount_cents",
+    "ledger_remainder_exact_across_current_files", "reconciliation_consistent",
+}
+_EXCLUSIVITY_TYPES = {
+    "unique_candidate_in_current_template", "weaker_semantic_candidates_rejected",
+    "candidate_store_scope", "unique_exact_target",
+}
 
 _VARIANT_SUFFIX = re.compile(r"(?:单盒|三盒|一盒|[13]盒|单|[13])$", re.I)
 _FORM_TOKENS = tuple(
@@ -153,6 +186,74 @@ def _dedupe_evidence(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
+def evidence_classes(items: Iterable[dict[str, Any]]) -> list[str]:
+    types = {str(item.get("type") or "") for item in items}
+    classes = []
+    for name, members in (
+        (HARD_IDENTITY, _HARD_IDENTITY_TYPES),
+        (DETERMINISTIC_STRUCTURE, _DETERMINISTIC_STRUCTURE_TYPES),
+        (SEMANTIC_EVIDENCE, _SEMANTIC_TYPES),
+        (CROSS_FILE_EVIDENCE, _CROSS_FILE_TYPES),
+        (GLOBAL_RECONCILIATION, _GLOBAL_RECONCILIATION_TYPES),
+        (EXCLUSIVITY_EVIDENCE, _EXCLUSIVITY_TYPES),
+    ):
+        if types & members:
+            classes.append(name)
+    return classes
+
+
+def finalize_resolution(decision: dict[str, Any]) -> dict[str, Any]:
+    """Attach an evidence-based class and review policy without inventing a score."""
+    item = dict(decision)
+    evidence = _dedupe_evidence(item.get("evidence", []))
+    contradictions = _dedupe_evidence(item.get("contradictions", []))
+    decision_type = str(item.get("decision") or HUMAN_REQUIRED)
+    if decision_type == MACHINE_INFERRED:
+        decision_type = INFERRED_REVIEW
+    if contradictions:
+        decision_type = HUMAN_REQUIRED
+    classes = evidence_classes(evidence)
+    evidence_types = {str(entry.get("type") or "") for entry in evidence}
+    confirmation_provenance = "HUMAN_CONFIRMED" if evidence_types & {
+        "human_confirmed_local_mapping", "confirmed_run_mapping", "human_confirmed_store_assignment", "human_confirmed_review"
+    } else None
+    if decision_type == VERIFIED:
+        risk = None
+        reason = "strong_identity_or_controlled_deterministic_relation"
+    elif decision_type == INFERRED_REVIEW:
+        strong_combination = (
+            GLOBAL_RECONCILIATION in classes
+            and (CROSS_FILE_EVIDENCE in classes or EXCLUSIVITY_EVIDENCE in classes)
+        ) or (
+            SEMANTIC_EVIDENCE in classes
+            and EXCLUSIVITY_EVIDENCE in classes
+            and (DETERMINISTIC_STRUCTURE in classes or CROSS_FILE_EVIDENCE in classes or GLOBAL_RECONCILIATION in classes)
+        )
+        risk = "LOW_REVIEW_RISK" if strong_combination else "MEDIUM_REVIEW_RISK"
+        reason = "unique_evidence_backed_inference_requires_human_review"
+    else:
+        risk = "HIGH_REVIEW_RISK"
+        reason = "no_unique_contradiction_free_answer"
+    item.update(
+        decision=decision_type,
+        decision_type=decision_type,
+        candidate=item.get("candidate"),
+        selected_answer=item.get("candidate"),
+        evidence=evidence,
+        evidence_classes=classes,
+        supporting_evidence=evidence,
+        contradictions=contradictions,
+        contradictions_checked={"status": "FAIL" if contradictions else "PASS", "items": contradictions},
+        alternatives=list(item.get("alternatives") or []),
+        reconciliation_result=dict(item.get("reconciliation") or {"status": "NOT_TESTED"}),
+        reason=reason,
+        human_review_required=decision_type in {INFERRED_REVIEW, HUMAN_REQUIRED},
+        review_risk=risk,
+        confirmation_provenance=confirmation_provenance,
+    )
+    return item
+
+
 def resolve_entity(
     source: str,
     candidates: Iterable[str],
@@ -210,11 +311,11 @@ def resolve_entity(
                 "reason": "unique_exact_target_without_contradiction",
             }],
         )
-        return base
+        return finalize_resolution(base)
     if len(exact) > 1:
         base["contradictions"].append(_evidence("conflicting_exact_targets", targets=sorted(exact)))
         base["alternatives"] = sorted(exact)
-        return base
+        return finalize_resolution(base)
 
     semantic_supplied = semantic_candidates is not None
     semantic_scope = _unique(semantic_candidates or [])
@@ -280,7 +381,7 @@ def resolve_entity(
     decision_candidates = sorted(strong_candidates) if strong_candidates else plausible
     base["alternatives"] = decision_candidates
     if len(decision_candidates) != 1 or base["contradictions"]:
-        return base
+        return finalize_resolution(base)
 
     candidate = decision_candidates[0]
     evidence = list(semantic[candidate])
@@ -323,10 +424,10 @@ def resolve_entity(
         types & {"current_store_product_scope", "sibling_alias_family", "reconciliation_consistent"}
     )
     if not base["contradictions"] and (strong_semantic or cross_file_supported or (weak_semantic and len(contextual_support) >= 2)):
-        base.update(candidate=candidate, decision=MACHINE_INFERRED, evidence=_dedupe_evidence(evidence), alternatives=[])
+        base.update(candidate=candidate, decision=INFERRED_REVIEW, evidence=_dedupe_evidence(evidence), alternatives=[])
     else:
         base.update(candidate=candidate, evidence=_dedupe_evidence(evidence), alternatives=[])
-    return base
+    return finalize_resolution(base)
 
 
 def resolve_global_store_constraints(
@@ -429,7 +530,7 @@ def resolve_global_store_constraints(
             "sources": [str(fact.get("source") or fact_id)],
             "fact_family": f"store-file:{fact_id}",
             "candidate": store,
-            "decision": MACHINE_INFERRED,
+            "decision": INFERRED_REVIEW,
             "evidence": evidence,
             "contradictions": [],
             "alternatives": [],
@@ -447,8 +548,9 @@ def resolve_global_store_constraints(
                 "current_run_assignments": allocation,
             },
         }
+        decisions[fact_id] = finalize_resolution(decisions[fact_id])
     base.update(
-        status=MACHINE_INFERRED,
+        status=INFERRED_REVIEW,
         assignments=allocation,
         decisions=decisions,
         reconciliation={"status": "PASS", "remaining_by_store_cents": remaining},
@@ -482,4 +584,45 @@ def merge_human_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str,
         if len(target_kinds) == 1:
             first["target_kind"] = next(iter(target_kinds))
         merged.append(first)
+    return merged
+
+
+def merge_inferred_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Coalesce records into independent business decisions for one review batch."""
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for raw in decisions:
+        decision = finalize_resolution(raw)
+        if decision.get("decision") != INFERRED_REVIEW:
+            continue
+        evidence_types = {str(item.get("type") or "") for item in decision.get("evidence", [])}
+        if "global_constraint_unique_solution" in evidence_types:
+            family = "global-allocation"
+        else:
+            family = str(decision.get("fact_family") or alias_family(decision.get("source")))
+        grouped[(str(decision.get("entity_type")), family, str(decision.get("candidate") or ""))].append(decision)
+
+    merged = []
+    for items in grouped.values():
+        first = dict(items[0])
+        sources = _unique(source for item in items for source in item.get("sources", [item.get("source", "")]))
+        first["source"] = sources[0] if len(sources) == 1 else " / ".join(sources)
+        first["sources"] = sources
+        first["evidence"] = _dedupe_evidence(evidence for item in items for evidence in item.get("evidence", []))
+        first["contradictions"] = _dedupe_evidence(
+            contradiction for item in items for contradiction in item.get("contradictions", [])
+        )
+        first["contexts"] = [context for item in items for context in item.get("contexts", [])]
+        first["mapping_sources"] = _unique(source for item in items for source in item.get("mapping_sources", []))
+        first["member_decisions"] = [
+            {
+                "entity_type": item.get("entity_type"),
+                "sources": list(item.get("sources") or [item.get("source")]),
+                "candidate": item.get("candidate"),
+            }
+            for item in items
+        ]
+        target_kinds = {str(item.get("target_kind")) for item in items if item.get("target_kind")}
+        if len(target_kinds) == 1:
+            first["target_kind"] = next(iter(target_kinds))
+        merged.append(finalize_resolution(first))
     return merged

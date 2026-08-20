@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/daily-roi/review-batch.schema.json",
+  "title": "Daily ROI inferred review batch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["batch_id", "status", "instructions", "items"],
+  "properties": {
+    "batch_id": { "type": "string", "pattern": "^RB-" },
+    "status": { "const": "INFERRED_REVIEW" },
+    "instructions": { "type": "string", "minLength": 1 },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["number", "review_id", "status", "sources", "proposed_answer", "decision_type", "evidence_classes", "evidence_summary", "contradictions_checked", "alternatives", "reconciliation_result", "reason", "review_risk", "human_review_required", "question", "resolution_candidate", "member_keys"],
+        "properties": {
+          "number": { "type": "integer", "minimum": 1 },
+          "review_id": { "type": "string", "pattern": "^RV-" },
+          "status": { "const": "PENDING" },
+          "sources": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "proposed_answer": { "type": "string", "minLength": 1 },
+          "decision_type": { "const": "INFERRED_REVIEW" },
+          "evidence_classes": { "type": "array", "items": { "type": "string" } },
+          "evidence_summary": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "contradictions_checked": { "type": "object" },
+          "alternatives": { "type": "array" },
+          "reconciliation_result": { "type": "object" },
+          "reason": { "type": "string" },
+          "review_risk": { "enum": ["LOW_REVIEW_RISK", "MEDIUM_REVIEW_RISK"] },
+          "human_review_required": { "const": true },
+          "question": { "type": "string", "minLength": 1 },
+          "resolution_candidate": { "type": "object" },
+          "persistence_candidate": { "type": ["object", "null"] },
+          "member_keys": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+        }
+      }
+    }
+  }
+}

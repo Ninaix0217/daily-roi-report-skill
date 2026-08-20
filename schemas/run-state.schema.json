@@ -7,12 +7,21 @@
   "properties": {
     "schema_version": { "const": 1 },
     "run_id": { "type": "string", "minLength": 1 },
-    "status": { "enum": ["HUMAN_REQUIRED", "READY_TO_WRITE", "COMPLETE", "VERIFICATION_FAILED"] },
+    "status": { "enum": ["HUMAN_REQUIRED", "INFERRED_REVIEW", "READY_TO_WRITE", "COMPLETE", "VERIFICATION_FAILED"] },
     "stage": { "enum": ["DISCOVER", "PREFLIGHT", "RESOLVE", "RECONCILE", "WRITE", "VERIFY", "COMPLETE"] },
     "input_dir": { "type": "string" },
     "output_dir": { "type": "string" },
     "manifest": { "type": "array" },
     "gates": { "type": "array", "items": { "$ref": "human-gate.schema.json" } },
+    "review_batch": { "oneOf": [{ "$ref": "review-batch.schema.json" }, { "type": "null" }] },
+    "review_metrics": {
+      "type": "object",
+      "properties": {
+        "review_accept_count": { "type": "integer", "minimum": 0 },
+        "review_reject_count": { "type": "integer", "minimum": 0 },
+        "review_correct_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "run_mappings": { "type": "object", "additionalProperties": { "type": "string" } },
     "audit": {
       "type": ["object", "null"],
@@ -23,7 +32,12 @@
           "properties": {
             "verified": { "type": "integer", "minimum": 0 },
             "machine_inferred": { "type": "integer", "minimum": 0 },
-            "human_required": { "type": "integer", "minimum": 0 }
+            "inferred_review": { "type": "integer", "minimum": 0 },
+            "human_required": { "type": "integer", "minimum": 0 },
+            "verified_count": { "type": "integer", "minimum": 0 },
+            "inferred_review_count": { "type": "integer", "minimum": 0 },
+            "human_required_count": { "type": "integer", "minimum": 0 },
+            "open_ended_human_decisions": { "type": "integer", "minimum": 0 }
           }
         }
       }

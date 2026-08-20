@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added evidence classes and the `VERIFIED` / `INFERRED_REVIEW` / `HUMAN_REQUIRED` decision model.
+- Added one-shot batch Review with explicit accept, reject, and correct transitions before workbook writing.
+- Upgraded accepted/corrected reusable mappings to human-confirmed Local Memory while keeping run-specific allocations local to the run.
+- Added review metrics, provenance schemas, and sanitized RC3 behavior replay coverage.
+
 ## 0.1.0-rc.3 — 2026-08-20
 
 - Added unique global cent-constraint resolution across current-run campaign files and ledger store totals.

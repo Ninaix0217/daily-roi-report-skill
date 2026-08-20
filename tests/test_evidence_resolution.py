@@ -21,7 +21,7 @@ from daily_roi_lib import (  # noqa: E402
     resolve_gate,
     resolve_product_evidence,
 )
-from evidence_resolution import HUMAN_REQUIRED, MACHINE_INFERRED, VERIFIED, resolve_entity, resolve_global_store_constraints  # noqa: E402
+from evidence_resolution import HUMAN_REQUIRED, INFERRED_REVIEW, VERIFIED, resolve_entity, resolve_global_store_constraints  # noqa: E402
 
 
 def template(products: list[str], *, store: str | None = None, skus: dict | None = None) -> dict:
@@ -95,7 +95,7 @@ class EvidenceDecisionTests(unittest.TestCase):
             sibling_sources=["舒1", "舒3"],
             reconciliation={"status": "PASS"},
         )
-        self.assertEqual(resolved["decision"], MACHINE_INFERRED)
+        self.assertEqual(resolved["decision"], INFERRED_REVIEW)
 
     def test_competing_semantic_candidates_remain_human_required(self):
         decision = resolve_entity(
@@ -115,7 +115,7 @@ class EvidenceDecisionTests(unittest.TestCase):
             ["Example Pharma-alpha", "Example Pharma-beta"],
             entity_type="store",
         )
-        self.assertEqual(decision["decision"], MACHINE_INFERRED)
+        self.assertEqual(decision["decision"], INFERRED_REVIEW)
         self.assertEqual(decision["candidate"], "Example Pharma-alpha")
         evidence_types = {item["type"] for item in decision["evidence"]}
         self.assertIn("unique_shared_token", evidence_types)
@@ -135,7 +135,7 @@ class EvidenceDecisionTests(unittest.TestCase):
         self.assertEqual(generated[0]["source_scope"], "current_store_products")
         self.assertTrue(generated[0]["evidence"])
         self.assertTrue(generated[0]["reason"])
-        self.assertEqual(decision["decision"], MACHINE_INFERRED)
+        self.assertEqual(decision["decision"], INFERRED_REVIEW)
 
     def test_ambiguous_semantics_with_two_bounded_candidates_requires_human(self):
         decision = resolve_entity(
@@ -204,7 +204,8 @@ class EvidenceWorkflowTests(unittest.TestCase):
             }
             self.assertEqual(decisions["shared-a.csv"]["candidate"], "Store Alpha")
             self.assertEqual(decisions["shared-b.csv"]["candidate"], "Store Alpha")
-            self.assertEqual(decisions["shared-a.csv"]["decision"], MACHINE_INFERRED)
+            self.assertEqual(decisions["shared-a.csv"]["decision"], INFERRED_REVIEW)
+            self.assertEqual(audit["review_batch"]["status"], INFERRED_REVIEW)
             self.assertEqual(decisions["shared-a.csv"]["reconciliation"]["status"], "PASS")
 
     def test_product_identity_resolver_maps_non_sku_identity_without_gate(self):
@@ -309,7 +310,9 @@ class EvidenceWorkflowTests(unittest.TestCase):
             self.assertFalse(gates)
             self.assertEqual(payload["expense_total_cents"], 1000)
             inferred = [item for item in audit["resolutions"] if item["source"] in {"舒1", "舒3"}]
-            self.assertEqual({item["decision"] for item in inferred}, {MACHINE_INFERRED})
+            self.assertEqual({item["decision"] for item in inferred}, {INFERRED_REVIEW})
+            alias_reviews = [item for item in audit["review_batch"]["items"] if set(item["sources"]) == {"舒1", "舒3"}]
+            self.assertEqual(len(alias_reviews), 1)
 
     def test_ambiguous_alias_family_emits_one_human_question(self):
         with tempfile.TemporaryDirectory() as root:
@@ -354,7 +357,7 @@ class EvidenceWorkflowTests(unittest.TestCase):
             self.assertFalse(gates)
             self.assertEqual(payload["expense_total_cents"], 1000)
             store_decisions = [item for item in audit["resolutions"] if item["entity_type"] == "store" and item["source"] == "xy Example-alpha"]
-            self.assertEqual(store_decisions[0]["decision"], MACHINE_INFERRED)
+            self.assertEqual(store_decisions[0]["decision"], INFERRED_REVIEW)
 
     def test_conflicting_template_sku_is_not_auto_resolved(self):
         with tempfile.TemporaryDirectory() as root:

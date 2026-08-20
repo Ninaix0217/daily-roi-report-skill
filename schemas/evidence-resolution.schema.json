@@ -1,20 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/daily-roi/evidence-resolution.schema.json",
-  "title": "Daily ROI Evidence Resolution v1.1",
+  "title": "Daily ROI Evidence Classification and Resolution v1",
   "type": "object",
   "additionalProperties": true,
-  "required": ["schema_version", "entity_type", "source", "sources", "fact_family", "candidate", "decision", "evidence", "contradictions", "alternatives", "candidate_generation", "reconciliation"],
+  "required": ["schema_version", "entity_type", "source", "sources", "fact_family", "candidate", "decision", "decision_type", "selected_answer", "evidence", "evidence_classes", "supporting_evidence", "contradictions", "contradictions_checked", "alternatives", "candidate_generation", "reconciliation", "reconciliation_result", "reason", "human_review_required", "review_risk", "confirmation_provenance"],
   "properties": {
     "schema_version": { "const": 1 },
-    "entity_type": { "enum": ["store", "product", "campaign", "sku"] },
+    "entity_type": { "enum": ["store", "product", "campaign", "sku", "workflow"] },
     "source": { "type": "string" },
     "sources": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
     "fact_family": { "type": "string", "minLength": 1 },
     "candidate": { "type": ["string", "null"] },
-    "decision": { "enum": ["VERIFIED", "MACHINE_INFERRED", "HUMAN_REQUIRED"] },
+    "decision": { "enum": ["VERIFIED", "INFERRED_REVIEW", "HUMAN_REQUIRED"] },
+    "decision_type": { "enum": ["VERIFIED", "INFERRED_REVIEW", "HUMAN_REQUIRED"] },
+    "selected_answer": { "type": ["string", "null"] },
     "evidence": { "type": "array", "items": { "type": "object" } },
+    "evidence_classes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["HARD_IDENTITY", "DETERMINISTIC_STRUCTURE", "SEMANTIC_EVIDENCE", "CROSS_FILE_EVIDENCE", "GLOBAL_RECONCILIATION", "EXCLUSIVITY_EVIDENCE"] }
+    },
+    "supporting_evidence": { "type": "array", "items": { "type": "object" } },
     "contradictions": { "type": "array", "items": { "type": "object" } },
+    "contradictions_checked": {
+      "type": "object",
+      "required": ["status", "items"],
+      "properties": {
+        "status": { "enum": ["PASS", "FAIL"] },
+        "items": { "type": "array", "items": { "type": "object" } }
+      }
+    },
     "alternatives": { "type": "array", "items": { "type": "string" } },
     "candidate_generation": {
       "type": "array",
@@ -33,6 +49,11 @@
       "type": "object",
       "required": ["status"],
       "properties": { "status": { "enum": ["PASS", "FAIL", "AMBIGUOUS", "NOT_TESTED"] } }
-    }
+    },
+    "reconciliation_result": { "$ref": "#/properties/reconciliation" },
+    "reason": { "type": "string", "minLength": 1 },
+    "human_review_required": { "type": "boolean" },
+    "review_risk": { "type": ["string", "null"], "enum": ["LOW_REVIEW_RISK", "MEDIUM_REVIEW_RISK", "HIGH_REVIEW_RISK", null] },
+    "confirmation_provenance": { "type": ["string", "null"], "enum": ["HUMAN_CONFIRMED", null] }
   }
 }

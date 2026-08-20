@@ -44,7 +44,7 @@ The worker locates report and support structures from semantic headers, formulas
 
 ## Evidence resolution boundary
 
-Unknown detection is not a permission boundary. The resolver first attempts exact identity and template relationships, then bounded semantic/context reasoning against current runtime candidates, then unique cross-file ledger constraints where necessary. Product identity unifies SKU and other stable platform product identifiers. It produces evidence-bearing `VERIFIED`, `MACHINE_INFERRED`, or `HUMAN_REQUIRED` decisions. Only the last class becomes a Human Gate. Machine decisions are never durable Local Memory.
+Unknown detection is not a permission boundary. The resolver first attempts exact identity and template relationships, then bounded semantic/context reasoning against current runtime candidates, then unique cross-file ledger constraints where necessary. Product identity unifies SKU and other stable platform product identifiers. It produces evidence-bearing `VERIFIED`, `INFERRED_REVIEW`, or `HUMAN_REQUIRED` decisions. Reviewable inferences carry a proposed answer and block writing until a batched human decision; only genuinely unresolved facts become open Human Gates. Unreviewed machine decisions are never durable Local Memory.
 
 ## Technology choice
 

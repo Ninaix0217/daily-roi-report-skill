@@ -1,0 +1,20 @@
+{
+  "original_human_items": 7,
+  "expected": {
+    "verified": 3,
+    "inferred_review": 3,
+    "human_required": 1,
+    "open_ended_human_decisions": 1
+  },
+  "semantic_families": [
+    {"sources": ["净1", "净3"], "candidate": "净润液"},
+    {"sources": ["清1", "清3"], "candidate": "清护水"}
+  ],
+  "global": {
+    "files": [
+      {"id": "export-a", "source": "export-a.csv", "total_cents": 111, "candidate_stores": ["Store Alpha"], "products": ["Product Alpha"]},
+      {"id": "export-b", "source": "export-b.csv", "total_cents": 222, "candidate_stores": ["Store Alpha"], "products": ["Product Alpha"]}
+    ],
+    "ledger_totals": {"Store Alpha": 333}
+  }
+}

@@ -1,4 +1,4 @@
-# Evidence Resolution Layer v1.1
+# Evidence Classification + Review Layer v1
 
 Unknown detection never goes directly to a Human Gate. Resolve every material nonzero entity in this order:
 
@@ -6,14 +6,14 @@ Unknown detection never goes directly to a Human Gate. Resolve every material no
 2. structural evidence from the current template/file/store;
 3. multi-evidence semantic and contextual resolution;
 4. cross-file contradiction and global reconciliation checks;
-5. Human Gate only when the result remains ambiguous or contradictory.
+5. classify the result as verified fact, reviewable inference, or unresolved human decision.
 
 ## Decision contract
 
-Every resolution records `source`, `candidate`, `decision`, evidence types, contradictions, alternatives, and reconciliation status. Semantic candidates also record their source scope and generation reason.
+Every resolution records `decision_type`, source(s), selected answer, evidence classes and supporting evidence, contradiction checks, alternatives, reconciliation result, reason, review risk, and whether human review is required. Semantic candidates also record their source scope and generation reason.
 
-- `VERIFIED`: exact template name, unique template SKU/item ID, stable identity, confirmed run mapping, confirmed Local Memory mapping, or a complete unique structural relationship.
-- `MACHINE_INFERRED`: the candidate is drawn only from the current TemplateModel, is unique, has explicit semantic evidence plus independent context/corroboration where required, survives contradiction checks, and is reconciliation-consistent when reconciliation can discriminate.
+- `VERIFIED`: exact template name, unique template SKU/item ID, stable identity, confirmed run/Local Memory mapping, or a complete controlled deterministic structural relationship. It executes without review.
+- `INFERRED_REVIEW`: the candidate is drawn only from the current TemplateModel, is unique, has semantic/structural/cross-file/reconciliation support, and survives contradiction checks. It is a proposal, not a verified fact; writing remains blocked until explicit acceptance or correction.
 - `HUMAN_REQUIRED`: multiple plausible candidates, conflicting evidence, weak semantics without enough independent support, an external nonzero identity, or an unresolved reconciliation consequence.
 
 No free-form probability or confidence number is an authorization to auto-resolve.
@@ -26,7 +26,15 @@ Structural resolution may map generic plans such as one-box/three-box markers to
 
 Semantic candidate generation uses the strongest available current-run boundary: current-store products first, then an explicitly bounded identity/file scope, and only then the current template when no narrower scope exists. It may use normalized roots, product-form normalization, containment, stable shared tokens, same-form variants, current-store scope, sibling alias families, exact-ID corroboration, and reconciliation. Each generated candidate must expose candidate, evidence, source scope, and reason. Weak one-character stems require at least two contextual supports.
 
-Global Constraint Resolution runs before a file-level store Gate when current files and the financial ledger form a complete constraint set. It uses exact integer cents, current file candidate stores/products, already attributed totals, and current ledger totals. Every participating file must contribute a non-amount product/identity constraint and must have no contradictory file evidence. A file is `MACHINE_INFERRED` only when the complete assignment has exactly one solution and every store difference is zero. An amount-only coincidence, multiple solutions, missing coverage, inconsistent prior attribution, negative remainder, or any nonzero difference remains `HUMAN_REQUIRED`. Filenames identify current-run occurrences only; historical filename ownership is never evidence.
+Global Constraint Resolution runs before a file-level store Gate when current files and the financial ledger form a complete constraint set. It uses exact integer cents, current file candidate stores/products, already attributed totals, and current ledger totals. Every participating file must contribute a non-amount product/identity constraint and must have no contradictory file evidence. A complete assignment with exactly one solution and zero differences becomes `INFERRED_REVIEW`, never `VERIFIED` merely because amounts reconcile. An amount-only coincidence, multiple solutions, missing coverage, inconsistent prior attribution, negative remainder, or nonzero difference remains `HUMAN_REQUIRED`. Filenames identify current-run occurrences only; historical filename ownership is never evidence.
+
+## Evidence classes and review risk
+
+- `HARD_IDENTITY`: exact stable identity or human-confirmed exact mapping; normally `VERIFIED`.
+- `DETERMINISTIC_STRUCTURE`: a controlled template/store relationship whose prerequisites are complete; may be `VERIFIED`.
+- `SEMANTIC_EVIDENCE`, `CROSS_FILE_EVIDENCE`, `GLOBAL_RECONCILIATION`, and `EXCLUSIVITY_EVIDENCE`: explain an inference but never impersonate identity evidence.
+
+Review risk is a fixed enum derived from those classes. A unique semantic result with structural/cross-file/reconciliation support is low or medium review risk. Conflicts or unresolved alternatives are high risk and `HUMAN_REQUIRED`. No probability score is used.
 
 Similarity alone is never identity and never authorizes deduplication.
 
@@ -34,4 +42,8 @@ Similarity alone is never identity and never authorizes deduplication.
 
 Internal blockers are not user questions. Group unresolved aliases by entity type and normalized alias family. If several sources represent one business fact, emit one Gate containing all sources and occurrences. A confirmed grouped mapping applies to every listed source; durable persistence still requires explicit human confirmation.
 
-Machine-inferred decisions are written only to the run audit. They never enter durable Local Memory.
+Unreviewed inferred decisions are written only to the run audit and pending Review Batch. They never enter durable Local Memory.
+
+## Batch review
+
+Coalesce inferred records into independent business decisions. One alias family or one global allocation to the same target is shown once. The user may accept, correct, or reject every item in one batch; the runner mutates state once and resumes once. Acceptance upgrades provenance to `HUMAN_CONFIRMED`; eligible reusable mappings may enter Local Memory. Correction persists only the human-provided target. Rejection never persists the proposed target and converts the fact into an open Human decision on resume.

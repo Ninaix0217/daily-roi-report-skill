@@ -6,7 +6,8 @@ For a completed run, report:
 Target Date: YYYY-MM-DD
 Input: <count> files
 Preflight: PASS
-Mappings: VERIFIED=<count>, MACHINE_INFERRED=<count>, human-confirmed=<count>, unresolved=<count>
+Mappings: VERIFIED=<count>, INFERRED_REVIEW=<count>, HUMAN_REQUIRED=<count>, human-confirmed=<count>
+Review: accepted=<count>, rejected=<count>, corrected=<count>, open-ended decisions=<count>
 Expense Reconciliation: PASS|FAIL; difference = 0.00
 Sales Reconciliation: PASS|NOT PROVIDED|FAIL
 Duplicate Evidence: <summary>
@@ -17,4 +18,4 @@ Result: <output filename>
 
 Also list runtime-discovered multi-product store totals, product splits, split totals, and differences. State which columns were intentionally left unfilled and why. Link the output workbook exactly once.
 
-For `MACHINE_INFERRED`, retain the evidence result in the run audit. In the user summary, describe only material inferred families; do not ask the user to confirm decisions that already passed the evidence policy.
+Before completion, present three distinct sections: **Verified Automatically**, **AI Proposed — Needs Review**, and **Needs Your Decision**. Show inferred families as proposed answers with concise supporting evidence, never as open-ended questions. No final workbook may exist while either of the latter two sections has unresolved items.

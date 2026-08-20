@@ -7,13 +7,24 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-from daily_roi_lib import DailyRoiError, LocalMemory, RuntimePaths, dependency_preflight, reset_memory, resolve_gate, run_report
+from daily_roi_lib import (
+    DailyRoiError,
+    LocalMemory,
+    RuntimePaths,
+    dependency_preflight,
+    reset_memory,
+    resolve_gate,
+    resolve_review_batch,
+    run_report,
+)
 
 
 def summary(state: dict) -> dict:
     audit = state.get("audit") or {}
     sales = audit.get("sales") or {}
     verification = state.get("verification") or {}
+    decisions = audit.get("resolution_summary") or {}
+    reviews = state.get("review_metrics") or {}
     return {
         "status": state.get("status"),
         "stage": state.get("stage"),
@@ -22,7 +33,17 @@ def summary(state: dict) -> dict:
         "input_file_count": len(state.get("manifest", [])),
         "human_gate_count": len(state.get("gates", [])),
         "gates": state.get("gates", []),
-        "resolution_summary": audit.get("resolution_summary"),
+        "inferred_review_count": len(((state.get("review_batch") or {}).get("items") or [])),
+        "review_batch": state.get("review_batch"),
+        "review_metrics": reviews,
+        "resolution_summary": decisions,
+        "VERIFIED_COUNT": decisions.get("verified_count", decisions.get("verified", 0)),
+        "INFERRED_REVIEW_COUNT": decisions.get("inferred_review_count", decisions.get("inferred_review", 0)),
+        "HUMAN_REQUIRED_COUNT": decisions.get("human_required_count", decisions.get("human_required", 0)),
+        "OPEN_ENDED_HUMAN_DECISIONS": decisions.get("open_ended_human_decisions", decisions.get("human_required", 0)),
+        "REVIEW_ACCEPT_COUNT": reviews.get("review_accept_count", 0),
+        "REVIEW_REJECT_COUNT": reviews.get("review_reject_count", 0),
+        "REVIEW_CORRECT_COUNT": reviews.get("review_correct_count", 0),
         "financial_total": _money(audit.get("financial_total_cents")),
         "product_expense_total": _money(audit.get("product_expense_total_cents")),
         "expense_difference": _money(audit.get("expense_difference_cents")),
@@ -64,6 +85,15 @@ def parser() -> argparse.ArgumentParser:
     resolve.add_argument("--node")
     resolve.add_argument("--node-modules")
 
+    review = sub.add_parser("review", help="Resolve one complete inferred-review batch and resume once")
+    review.add_argument("--workspace", type=Path, default=Path.cwd())
+    response_group = review.add_mutually_exclusive_group(required=True)
+    response_group.add_argument("--responses-json", type=Path)
+    response_group.add_argument("--accept-all", action="store_true")
+    review.add_argument("--persistence", choices=["PERSISTENT_REUSABLE", "RUN_ONLY"], default="RUN_ONLY")
+    review.add_argument("--node")
+    review.add_argument("--node-modules")
+
     status = sub.add_parser("status", help="Show the concise current-run status")
     status.add_argument("--workspace", type=Path, default=Path.cwd())
 
@@ -86,11 +116,28 @@ def main() -> int:
         if args.command == "run":
             state = run_report(args.workspace, args.input_dir, args.output_dir, node=args.node, node_modules=args.node_modules)
             print(json.dumps(summary(state), ensure_ascii=False, indent=2))
-            return 2 if state["status"] == "HUMAN_REQUIRED" else (0 if state["status"] == "COMPLETE" else 1)
+            return 2 if state["status"] in {"HUMAN_REQUIRED", "INFERRED_REVIEW"} else (0 if state["status"] == "COMPLETE" else 1)
         if args.command == "resolve":
             state = resolve_gate(args.workspace, args.gate_id, target=args.target, persistence=args.persistence, node=args.node, node_modules=args.node_modules)
             print(json.dumps(summary(state), ensure_ascii=False, indent=2))
-            return 2 if state["status"] == "HUMAN_REQUIRED" else (0 if state["status"] == "COMPLETE" else 1)
+            return 2 if state["status"] in {"HUMAN_REQUIRED", "INFERRED_REVIEW"} else (0 if state["status"] == "COMPLETE" else 1)
+        if args.command == "review":
+            responses = None
+            if args.responses_json:
+                raw = json.loads(args.responses_json.read_text(encoding="utf-8"))
+                responses = raw.get("responses") if isinstance(raw, dict) else raw
+                if not isinstance(responses, list):
+                    raise DailyRoiError("Review response JSON must be a list or an object containing a responses list")
+            state = resolve_review_batch(
+                args.workspace,
+                responses,
+                accept_all=args.accept_all,
+                default_persistence=args.persistence,
+                node=args.node,
+                node_modules=args.node_modules,
+            )
+            print(json.dumps(summary(state), ensure_ascii=False, indent=2))
+            return 2 if state["status"] in {"HUMAN_REQUIRED", "INFERRED_REVIEW"} else (0 if state["status"] == "COMPLETE" else 1)
         if args.command == "status":
             current = RuntimePaths.for_workspace(args.workspace).current_run
             if not current.exists():
