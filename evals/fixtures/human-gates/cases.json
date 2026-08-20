@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"id": "A", "scenario": "unknown_nonzero_mapping", "expected": "HUMAN_REQUIRED"},
+    {"id": "B", "scenario": "confirm_persist_resume", "expected": "COMPLETE"},
+    {"id": "C", "scenario": "learned_mapping_reuse", "expected": "AUTO_RESOLVE"},
+    {"id": "D", "scenario": "workspace_memory_isolation", "expected": "ISOLATED"},
+    {"id": "E", "scenario": "stale_template_date_with_rule", "expected": "AUTO_UPDATE_TEMPLATE_DATE"},
+    {"id": "F", "scenario": "business_source_date_conflict", "expected": "HUMAN_REQUIRED"},
+    {"id": "G", "scenario": "similar_record_without_identity", "expected": "HUMAN_REQUIRED"},
+    {"id": "H", "scenario": "template_external_nonzero_sku", "expected": "HUMAN_REQUIRED"}
+  ]
+}

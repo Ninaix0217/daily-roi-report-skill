@@ -1,0 +1,7 @@
+interface:
+  display_name: "Daily ROI Report"
+  short_description: "Build and verify daily ROI Excel reports safely."
+  default_prompt: "Use $daily-roi-report-skill to process the supplied daily ROI workbook inputs, stop on unresolved material facts, and deliver a verified Excel result."
+
+policy:
+  allow_implicit_invocation: true

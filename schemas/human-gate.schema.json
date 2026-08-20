@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/daily-roi/human-gate.schema.json",
+  "title": "Daily ROI Human Gate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["gate_id", "gate_type", "status", "blocking_reason", "evidence", "question"],
+  "properties": {
+    "gate_id": { "type": "string", "minLength": 1 },
+    "gate_type": { "enum": ["HG-01", "HG-02", "HG-03", "HG-04", "HG-05", "HG-06"] },
+    "status": { "const": "HUMAN_REQUIRED" },
+    "blocking_reason": { "type": "string", "minLength": 1 },
+    "evidence": { "type": "object" },
+    "candidate_resolution": { "type": ["object", "null"] },
+    "question": { "type": "string", "minLength": 1 },
+    "persistence_candidate": { "type": ["object", "null"] }
+  }
+}

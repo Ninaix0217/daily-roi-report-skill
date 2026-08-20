@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/daily-roi/memory.schema.json",
+  "title": "Daily ROI local memory v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "entity_mappings", "workflow_rules"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "entity_mappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "entity_type", "source", "target", "status", "source_type"],
+        "properties": {
+          "kind": { "const": "entity_mapping" },
+          "entity_type": { "enum": ["store", "product", "campaign", "sku"] },
+          "source": { "type": "string", "minLength": 1 },
+          "target": { "type": "string", "minLength": 1 },
+          "status": { "const": "confirmed" },
+          "source_type": { "const": "human_confirmation" },
+          "confirmed_at": { "type": "string" },
+          "gate_id": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "workflow_rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "rule", "condition", "action", "status", "source_type"],
+        "properties": {
+          "kind": { "const": "workflow_rule" },
+          "rule": { "const": "auto_update_stale_template_date" },
+          "condition": { "const": "all_business_sources_same_date_and_template_only_differs" },
+          "action": { "const": "update_template_date" },
+          "status": { "const": "confirmed" },
+          "source_type": { "const": "human_confirmation" },
+          "confirmed_at": { "type": "string" },
+          "gate_id": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

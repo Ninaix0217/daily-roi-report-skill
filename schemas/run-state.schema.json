@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/daily-roi/run-state.schema.json",
+  "title": "Daily ROI current run state v1",
+  "type": "object",
+  "required": ["schema_version", "run_id", "status", "stage", "input_dir", "output_dir", "manifest", "gates", "run_mappings"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["HUMAN_REQUIRED", "READY_TO_WRITE", "COMPLETE", "VERIFICATION_FAILED"] },
+    "stage": { "enum": ["DISCOVER", "PREFLIGHT", "RESOLVE", "RECONCILE", "WRITE", "VERIFY", "COMPLETE"] },
+    "input_dir": { "type": "string" },
+    "output_dir": { "type": "string" },
+    "manifest": { "type": "array" },
+    "gates": { "type": "array", "items": { "$ref": "human-gate.schema.json" } },
+    "run_mappings": { "type": "object", "additionalProperties": { "type": "string" } }
+  }
+}

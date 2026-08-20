@@ -1,0 +1,56 @@
+# Python / Node / editor caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.validator-deps/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Employee-owned runtime state and Local Memory
+.daily-roi/
+**/.daily-roi/
+memory.json
+confirmations.jsonl
+current-run.json
+
+# Local development evidence and private acceptance fixtures
+development-evidence/
+evals/fixtures/private/
+evals/golden-*.expected.json
+evals/run_golden.py
+evals/run_human_gate_e2e.py
+tests/private/
+
+# Generated evaluation, conversion, render, and debug artifacts
+evals/results/
+evals/runtime/
+evals/tmp/
+rendered/
+converted/
+libreoffice-profile/
+*.inspect.ndjson
+*.ndjson
+*.log
+*.tmp
+*.bak
+~$*
+
+# Business spreadsheets/exports are denied by default. Only explicitly
+# sanitized test fixtures under tests/fixtures/sanitized may be committed.
+*.xls
+*.xlsx
+*.csv
+*.png
+*.jpg
+*.jpeg
+!tests/fixtures/sanitized/**/*.xls
+!tests/fixtures/sanitized/**/*.xlsx
+!tests/fixtures/sanitized/**/*.csv
+!assets/**/*.png
+!assets/**/*.jpg
+!assets/**/*.jpeg
