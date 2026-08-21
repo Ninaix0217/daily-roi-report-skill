@@ -31,6 +31,12 @@ Before `HUMAN_REQUIRED`, the decision audit records exhaustion of relevant hard 
 
 Global Constraint Resolution runs before a file-level store Gate when current files and the financial ledger form a complete constraint set. It uses exact integer cents, current file candidate stores/products, already attributed totals, and current ledger totals. Every participating file must contribute a non-amount product/identity constraint and must have no contradictory file evidence. A complete assignment with exactly one solution and zero differences becomes `INFERRED_REVIEW`, never `VERIFIED` merely because amounts reconcile. An amount-only coincidence, multiple solutions, missing coverage, inconsistent prior attribution, negative remainder, or nonzero difference remains `HUMAN_REQUIRED`. Filenames identify current-run occurrences only; historical filename ownership is never evidence.
 
+Before final Human classification, compatible product-member and campaign paths may union evidence only when they express the same `PRODUCT_ASSIGNMENT`, share the same nonempty store scope and semantic root (or an explicit bridge), the product side has an evidence-backed preferred target, campaign sibling evidence and reconciliation agree, and no hard contradiction or competing candidate survives. The union remains `INFERRED_REVIEW`. Cross-store, cross-relation, identity-conflicted, or multi-candidate cases never union.
+
+Independent Review consolidation uses business relation kind rather than raw entity type alone. Cross-entity members merge only when target, store scope, semantic root/bridge, relation kind, alternatives, and contradiction state are compatible. The final post-consolidation count is the user-facing independent Review count; any pre-cross-entity count is labeled `post_intra_entity_family_merge_count`.
+
+When a global allocation has a unique amount-only zero-difference shape but no accepted non-amount identity bridge, it stays `HUMAN_REQUIRED`. The runner may expose `AMOUNT_ONLY_HINT` with `selected_answer = null`; that clue cannot enter the inferred Review batch, auto-assignment, or durable memory.
+
 ## Evidence classes and review risk
 
 - `HARD_IDENTITY`: exact stable identity or human-confirmed exact mapping; normally `VERIFIED`.

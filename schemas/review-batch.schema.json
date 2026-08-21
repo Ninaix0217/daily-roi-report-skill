@@ -9,6 +9,7 @@
     "batch_id": { "type": "string", "pattern": "^RB-" },
     "status": { "const": "INFERRED_REVIEW" },
     "instructions": { "type": "string", "minLength": 1 },
+    "post_intra_entity_family_merge_count": { "type": "integer", "minimum": 1 },
     "review_ux": {
       "type": "object",
       "required": ["text", "recommended_reply", "prefilled_review_decisions", "review_decisions", "prefilled_review_rate", "open_ended_human_decisions"],

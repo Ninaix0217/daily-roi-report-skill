@@ -53,4 +53,6 @@ The CLI response file is deliberately small and structured:
 
 A grouped mapping contains all equivalent sources. One confirmation applies to every listed source; persistence writes each exact source mapping separately so later exact lookup remains deterministic. Current hard identity outranks historical memory; a conflict is surfaced and the old item becomes `CONFLICTED` rather than silently winning. Human correction supersedes the prior active item without deleting its provenance.
 
+When one independent Review consolidates product and campaign members, persistence eligibility is evaluated per original member. Every eligible member keeps its own entity type, minimum-safe scope, source lineage, and confirmation provenance. Run-only members are applied only to the current run and are never persisted merely because another member in the same Review is durable.
+
 The resume operation retains the run ID and run mappings, rereads inputs, and recomputes deterministic checks. This avoids restarting conversational analysis while detecting source mutations.

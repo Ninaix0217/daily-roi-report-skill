@@ -23,7 +23,8 @@ def persistence_eligibility(item: dict[str, Any]) -> dict[str, Any]:
     evidence_types = {str(value.get("type") or "") for value in item.get("supporting_evidence", [])}
     run_only_tokens = {"full_store_export"}
     run_only = (
-        "global_constraint_unique_solution" in evidence_types
+        bool(item.get("run_only"))
+        or "global_constraint_unique_solution" in evidence_types
         or any(source in run_only_tokens or source.startswith("regular_store:") for source in sources)
         or (entity_type == "campaign" and resolution.get("target_kind") == "store")
     )
@@ -49,10 +50,16 @@ def persistence_eligibility(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def render_review_batch(batch: dict[str, Any] | None, *, verified_records: int = 0) -> dict[str, Any] | None:
-    if not batch or not batch.get("items"):
+def render_review_batch(
+    batch: dict[str, Any] | None,
+    *,
+    verified_records: int = 0,
+    human_gates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    gates = list(human_gates or [])
+    if (not batch or not batch.get("items")) and not gates:
         return None
-    items = list(batch["items"])
+    items = list((batch or {}).get("items", []))
     focus = [item for item in items if item.get("review_risk") in {"MEDIUM_REVIEW_RISK", "HIGH_REVIEW_RISK"} or item.get("alternatives")]
     low = [item for item in items if item not in focus]
     lines = [f"自动确认：{verified_records} 项", "", "AI 已完成以下判断，请快速审阅："]
@@ -76,7 +83,34 @@ def render_review_batch(batch: dict[str, Any] | None, *, verified_records: int =
 
     section("建议重点确认", focus)
     section("低风险建议", low)
+
+    gate_replies = []
+    if gates:
+        lines.extend(["", "### 需要你决定", ""])
+        next_number = max((int(item.get("number", 0)) for item in items), default=0) + 1
+        for offset, gate in enumerate(gates):
+            number = next_number + offset
+            resolution = dict((gate.get("evidence") or {}).get("resolution") or {})
+            hint = dict(resolution.get("useful_hint") or {})
+            sources = list(resolution.get("sources") or [resolution.get("source")])
+            sources = [str(value) for value in sources if str(value or "").strip()]
+            lines.append(f"{number}. {' / '.join(sources) or gate.get('gate_id')}")
+            if hint.get("evidence_status") == "AMOUNT_ONLY_HINT" and hint.get("candidate"):
+                candidate = str(hint["candidate"])
+                lines.extend([
+                    "   当前没有足够身份关系自动确认。",
+                    f"   金额上唯一完全匹配：{candidate}。",
+                    "",
+                    f"   如果正确，回复：{number}是",
+                    f"   如果不正确：{number}改为正确店铺",
+                    "",
+                ])
+                gate_replies.append(f"{number}是")
+            else:
+                lines.extend([f"   {gate.get('question')}", ""])
     recommended = "全部接受，符合长期记忆条件的映射记住"
+    if gate_replies:
+        recommended += "；" + "；".join(gate_replies)
     lines.extend(["# Recommended Reply", "", recommended])
     if focus:
         first = focus[0]
@@ -88,12 +122,17 @@ def render_review_batch(batch: dict[str, Any] | None, *, verified_records: int =
         "recommended_reply": recommended,
         "prefilled_review_decisions": prefilled,
         "review_decisions": len(items),
-        "prefilled_review_rate": prefilled / len(items),
-        "open_ended_human_decisions": 0,
+        "prefilled_review_rate": prefilled / len(items) if items else 0,
+        "open_ended_human_decisions": len(gates),
     }
 
 
-def parse_review_reply(text: str, batch: dict[str, Any]) -> dict[str, Any]:
+def parse_review_reply(
+    text: str,
+    batch: dict[str, Any],
+    *,
+    human_gates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     reply = str(text or "").strip()
     if not reply:
         raise ReviewReplyError("Review reply is empty")
@@ -113,7 +152,17 @@ def parse_review_reply(text: str, batch: dict[str, Any]) -> dict[str, Any]:
     accepted: set[int] = set()
     for match in re.finditer(r"(?P<numbers>\d+(?:\s*[、,，]\s*\d+)*)\s*对", reply):
         accepted.update(int(value) for value in re.findall(r"\d+", match.group("numbers")))
-    unknown = sorted((set(corrections) | accepted) - set(by_number))
+    first_human_number = max(by_number, default=0) + 1
+    human_by_number = {
+        first_human_number + offset: gate
+        for offset, gate in enumerate(human_gates or [])
+    }
+    hinted_confirmations = {
+        int(match.group("number"))
+        for match in re.finditer(r"(?P<number>\d+)\s*是(?:[，,；;。\s]|$)", reply)
+    }
+    known_numbers = set(by_number) | set(human_by_number)
+    unknown = sorted((set(corrections) | accepted | hinted_confirmations) - known_numbers)
     if unknown:
         raise ReviewReplyError(f"Unknown review numbers: {unknown}")
     responses = []
@@ -125,4 +174,30 @@ def parse_review_reply(text: str, batch: dict[str, Any]) -> dict[str, Any]:
     if len(responses) != len(by_number):
         missing = sorted(set(by_number) - {number for number in by_number if accept_all or number in accepted or number in corrections})
         raise ReviewReplyError(f"Review batch must be resolved together; missing numbers={missing}")
-    return {"responses": responses, "remember_eligible": remember, "batch_id": batch.get("batch_id")}
+    human_responses = []
+    for number, gate in human_by_number.items():
+        if number in corrections:
+            human_responses.append({
+                "gate_id": gate["gate_id"],
+                "action": "CORRECT",
+                "target": corrections[number],
+                "classification": "RUN_ONLY",
+            })
+        elif number in hinted_confirmations:
+            resolution = dict((gate.get("evidence") or {}).get("resolution") or {})
+            hint = dict(resolution.get("useful_hint") or {})
+            if hint.get("evidence_status") != "AMOUNT_ONLY_HINT" or not hint.get("candidate"):
+                raise ReviewReplyError(f"Human decision {number} has no confirmable hint")
+            human_responses.append({
+                "gate_id": gate["gate_id"],
+                "action": "CONFIRM_HINT",
+                "target": str(hint["candidate"]),
+                "classification": "RUN_ONLY",
+                "evidence_status": "AMOUNT_ONLY_HINT",
+            })
+    return {
+        "responses": responses,
+        "human_responses": human_responses,
+        "remember_eligible": remember,
+        "batch_id": batch.get("batch_id"),
+    }

@@ -23,7 +23,12 @@ def summary(state: dict) -> dict:
     audit = state.get("audit") or {}
     sales = audit.get("sales") or {}
     verification = state.get("verification") or {}
-    decisions = audit.get("resolution_summary") or {}
+    decisions = dict(audit.get("resolution_summary") or {})
+    resolutions = list(audit.get("resolutions") or [])
+    if resolutions:
+        canonical_verified = sum(item.get("decision") == "VERIFIED" for item in resolutions)
+        decisions["verified"] = canonical_verified
+        decisions["verified_count"] = canonical_verified
     reviews = state.get("review_metrics") or {}
     return {
         "status": state.get("status"),

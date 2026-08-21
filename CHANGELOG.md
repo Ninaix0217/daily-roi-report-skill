@@ -7,6 +7,7 @@
 - Added Memory Layer v2 eligibility, minimum-safe scope, typed/provenanced facts, rejected-proposal audit, hard-identity conflict handling, lifecycle transitions, and lineage deduplication.
 - Added simulated, provenance-marked failure-archetype scenarios plus runner-level pending-review write-boundary regression. These fixtures do not reproduce an original external run.
 - Added a minimal development-validation dependency manifest and full runtime-instance JSON Schema validator.
+- Added a narrow Candidate 2 patch for guarded cross-path semantic evidence union, cross-entity product-assignment consolidation, canonical final VERIFIED counts, amount-only Human Gate hints, and per-member durable-memory preservation.
 
 ## 0.1.0-rc.4 — 2026-08-20
 

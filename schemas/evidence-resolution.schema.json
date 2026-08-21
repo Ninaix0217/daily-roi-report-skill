@@ -11,6 +11,10 @@
     "source": { "type": "string" },
     "sources": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
     "fact_family": { "type": "string", "minLength": 1 },
+    "semantic_root": { "type": "string" },
+    "business_relation_kind": {
+      "enum": ["PRODUCT_ASSIGNMENT", "STORE_ASSIGNMENT", "STORE_ALLOCATION", "WORKFLOW_RULE"]
+    },
     "candidate": { "type": ["string", "null"] },
     "decision": { "enum": ["VERIFIED", "INFERRED_REVIEW", "HUMAN_REQUIRED"] },
     "decision_type": { "enum": ["VERIFIED", "INFERRED_REVIEW", "HUMAN_REQUIRED"] },

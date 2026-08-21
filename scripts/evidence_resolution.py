@@ -32,7 +32,10 @@ _SEMANTIC_TYPES = {
     "single_character_root_variant", "transposed_root_variant", "shared_semantic_anchor", "weak_shared_anchor",
     "same_product_form", "shared_distinct_token", "unique_shared_token", "sibling_alias_family",
 }
-_CROSS_FILE_TYPES = {"cross_file_identity_corroboration", "current_run_evidence_only"}
+_CROSS_FILE_TYPES = {
+    "cross_file_identity_corroboration", "current_run_evidence_only",
+    "cross_path_semantic_evidence_union",
+}
 _GLOBAL_RECONCILIATION_TYPES = {
     "global_constraint_unique_solution", "current_file_amount_cents",
     "ledger_remainder_exact_across_current_files",
@@ -460,7 +463,16 @@ def resolve_entity(
         ))
         decision_candidates = [candidate]
         base["alternatives"] = rejected
+    contextual_evidence: list[dict[str, Any]] = []
+    siblings = _unique(sibling_sources)
+    if len(siblings) >= 2 and len({alias_family(item) for item in siblings}) == 1:
+        contextual_evidence.append(_evidence("sibling_alias_family", sources=siblings))
+    if reconciliation and reconciliation.get("status") == "PASS":
+        contextual_evidence.append(_evidence("reconciliation_consistent", **{k: v for k, v in reconciliation.items() if k != "status"}))
+    elif reconciliation and reconciliation.get("status") == "FAIL":
+        base["contradictions"].append(_evidence("reconciliation_conflict", **{k: v for k, v in reconciliation.items() if k != "status"}))
     if len(decision_candidates) != 1 or base["contradictions"]:
+        base["evidence"] = _dedupe_evidence([*base.get("evidence", []), *contextual_evidence])
         return finalize_resolution(base)
 
     candidate = decision_candidates[0]
@@ -472,13 +484,7 @@ def resolve_entity(
     evidence.append(_evidence("unique_candidate_in_current_template"))
     if context_supplied and normalize_entity(candidate) in context_keys:
         evidence.append(_evidence("current_store_product_scope", candidate_count=len(context_keys)))
-    siblings = _unique(sibling_sources)
-    if len(siblings) >= 2 and len({alias_family(item) for item in siblings}) == 1:
-        evidence.append(_evidence("sibling_alias_family", sources=siblings))
-    if reconciliation and reconciliation.get("status") == "PASS":
-        evidence.append(_evidence("reconciliation_consistent", **{k: v for k, v in reconciliation.items() if k != "status"}))
-    elif reconciliation and reconciliation.get("status") == "FAIL":
-        base["contradictions"].append(_evidence("reconciliation_conflict", **{k: v for k, v in reconciliation.items() if k != "status"}))
+    evidence.extend(contextual_evidence)
 
     types = {item["type"] for item in evidence}
     strong_semantic = bool(
@@ -531,8 +537,10 @@ def resolve_global_store_constraints(
         "solutions_found": 0,
         "assignments": {},
         "decisions": {},
+        "amount_only_hint": None,
         "reconciliation": {"status": "NOT_TESTED", "remaining_by_store_cents": remaining},
     }
+    amount_only_hint = _amount_only_unique_hint(facts, remaining)
     if (
         not facts
         or any(value < 0 for value in remaining.values())
@@ -540,6 +548,8 @@ def resolve_global_store_constraints(
         or any(not item.get("products") for item in facts)
         or any(bool(item.get("has_conflict")) for item in facts)
     ):
+        if facts and not any(bool(item.get("has_conflict")) for item in facts):
+            base["amount_only_hint"] = amount_only_hint
         base["reconciliation"] = {
             "status": "FAIL",
             "reason": "missing_non_amount_constraint_or_conflicting_file_evidence",
@@ -647,6 +657,48 @@ def resolve_global_store_constraints(
     return base
 
 
+def _amount_only_unique_hint(file_facts: list[dict[str, Any]], remaining: dict[str, int]) -> dict[str, Any] | None:
+    """Expose a non-authoritative amount-only clue without creating an assignment."""
+    if not file_facts or any(value < 0 for value in remaining.values()):
+        return None
+    if sum(int(item.get("total_cents", 0)) for item in file_facts) != sum(remaining.values()):
+        return None
+    ordered = sorted(file_facts, key=lambda item: (-int(item.get("total_cents", 0)), str(item.get("id"))))
+    running = {store: 0 for store in remaining}
+    solutions: list[dict[str, str]] = []
+
+    def search(index: int, allocation: dict[str, str]) -> None:
+        if len(solutions) >= 2:
+            return
+        if index == len(ordered):
+            if all(running[store] == remaining[store] for store in remaining):
+                solutions.append(dict(allocation))
+            return
+        fact = ordered[index]
+        amount = int(fact.get("total_cents", 0))
+        for store in sorted(remaining):
+            if running[store] + amount > remaining[store]:
+                continue
+            running[store] += amount
+            allocation[str(fact.get("id"))] = store
+            search(index + 1, allocation)
+            allocation.pop(str(fact.get("id")), None)
+            running[store] -= amount
+
+    search(0, {})
+    if len(solutions) != 1:
+        return None
+    assignments = solutions[0]
+    targets = sorted(set(assignments.values()))
+    return {
+        "evidence_status": "AMOUNT_ONLY_HINT",
+        "candidate": targets[0] if len(targets) == 1 else None,
+        "selected_answer": None,
+        "assignments": assignments,
+        "reason": "unique_zero_difference_amount_match_without_independent_identity_bridge",
+    }
+
+
 def merge_human_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: list[list[dict[str, Any]]] = []
 
@@ -701,7 +753,142 @@ def merge_human_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str,
     return merged
 
 
-def merge_inferred_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+def business_relation_kind(decision: dict[str, Any]) -> str:
+    explicit = str(decision.get("business_relation_kind") or "").strip()
+    if explicit:
+        return explicit
+    entity_type = str(decision.get("entity_type") or "")
+    target_kind = str(decision.get("target_kind") or ("store" if entity_type == "store" else "product"))
+    evidence_types = {str(item.get("type") or "") for item in decision.get("evidence", [])}
+    if target_kind == "store" and "global_constraint_unique_solution" in evidence_types:
+        return "STORE_ALLOCATION"
+    if target_kind == "store":
+        return "STORE_ASSIGNMENT"
+    if entity_type in {"product", "campaign", "sku"}:
+        return "PRODUCT_ASSIGNMENT"
+    if entity_type == "workflow":
+        return "WORKFLOW_RULE"
+    return f"{entity_type.upper()}_ASSIGNMENT" if entity_type else "UNKNOWN"
+
+
+def _decision_stores(decision: dict[str, Any]) -> set[str]:
+    stores = {
+        normalize_entity(context.get("store") or context.get("template_store"))
+        for context in decision.get("contexts", [])
+        if isinstance(context, dict)
+    }
+    stores.discard("")
+    return stores
+
+
+def _decision_roots(decision: dict[str, Any]) -> set[str]:
+    explicit = normalize_entity(decision.get("semantic_root"))
+    if explicit:
+        return {explicit}
+    return {
+        alias_family(value)
+        for value in decision.get("sources", [decision.get("source")])
+        if alias_family(value)
+    }
+
+
+def _source_bridges(decision: dict[str, Any]) -> set[str]:
+    raw = decision.get("source_bridges") or decision.get("source_bridge") or []
+    values = raw if isinstance(raw, list) else [raw]
+    return {normalize_entity(value) for value in values if normalize_entity(value)}
+
+
+def _has_identity_or_evidence_conflict(decision: dict[str, Any]) -> bool:
+    if decision.get("identity_namespace_conflict"):
+        return True
+    return bool(decision.get("contradictions"))
+
+
+def union_cross_path_evidence(decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Union compatible product-member and campaign evidence before final Human classification."""
+    items = [finalize_resolution(item) for item in decisions]
+    for product in items:
+        if product.get("entity_type") != "product" or business_relation_kind(product) != "PRODUCT_ASSIGNMENT":
+            continue
+        target = str(product.get("candidate") or "")
+        product_types = {str(item.get("type") or "") for item in product.get("evidence", [])}
+        generated_preference = any(
+            normalize_entity(generated.get("candidate")) == normalize_entity(target)
+            for generated in product.get("candidate_generation", [])
+        )
+        if (
+            not target
+            or not (
+                "evidence_supported_preference" in product_types
+                or ("unique_candidate_in_current_template" in product_types and generated_preference)
+            )
+            or product.get("alternatives")
+            or _has_identity_or_evidence_conflict(product)
+        ):
+            continue
+        product_stores = _decision_stores(product)
+        product_roots = _decision_roots(product)
+        product_bridges = _source_bridges(product)
+        compatible_campaigns = []
+        for campaign in items:
+            if campaign.get("entity_type") != "campaign" or business_relation_kind(campaign) != "PRODUCT_ASSIGNMENT":
+                continue
+            campaign_types = {str(item.get("type") or "") for item in campaign.get("evidence", [])}
+            campaign_target = str(campaign.get("candidate") or "")
+            same_scope = bool(product_stores and product_stores == _decision_stores(campaign))
+            bridged = bool(product_bridges & _source_bridges(campaign))
+            same_root = bool(product_roots & _decision_roots(campaign))
+            if not (same_scope and (same_root or bridged)):
+                continue
+            if (
+                campaign_target not in {"", target}
+                or campaign.get("alternatives")
+                or _has_identity_or_evidence_conflict(campaign)
+                or "sibling_alias_family" not in campaign_types
+                or (campaign.get("reconciliation") or {}).get("status") != "PASS"
+            ):
+                continue
+            compatible_campaigns.append(campaign)
+        competing_targets = {
+            str(other.get("candidate") or "")
+            for other in items
+            if other is not product
+            and business_relation_kind(other) == "PRODUCT_ASSIGNMENT"
+            and _decision_stores(other) == product_stores
+            and bool(_decision_roots(other) & product_roots)
+            and other.get("candidate")
+        }
+        if competing_targets - {target} or not compatible_campaigns:
+            continue
+        proof = _evidence(
+            "cross_path_semantic_evidence_union",
+            target=target,
+            stores=sorted(product_stores),
+            roots=sorted(product_roots),
+            product_source=product.get("source"),
+            campaign_sources=_unique(
+                source for campaign in compatible_campaigns for source in campaign.get("sources", [campaign.get("source")])
+            ),
+        )
+        for member in [product, *compatible_campaigns]:
+            member.update(
+                candidate=target,
+                decision=INFERRED_REVIEW,
+                evidence=_dedupe_evidence([*member.get("evidence", []), proof]),
+                alternatives=[],
+                business_relation_kind="PRODUCT_ASSIGNMENT",
+            )
+            refreshed = finalize_resolution(member)
+            member.clear()
+            member.update(refreshed)
+    return items
+
+
+def merge_inferred_decisions(
+    decisions: Iterable[dict[str, Any]],
+    *,
+    cross_entity: bool = True,
+) -> list[dict[str, Any]]:
     """Coalesce records into independent business decisions for one review batch."""
     grouped: list[dict[str, Any]] = []
 
@@ -731,13 +918,25 @@ def merge_inferred_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[s
         match = None
         for group in grouped:
             first = group["items"][0]
-            same_identity = (
-                str(first.get("entity_type")) == str(decision.get("entity_type"))
-                and normalize_entity(first.get("candidate")) == normalize_entity(decision.get("candidate"))
-            )
+            same_target = normalize_entity(first.get("candidate")) == normalize_entity(decision.get("candidate"))
+            same_entity = str(first.get("entity_type")) == str(decision.get("entity_type"))
+            same_identity = same_entity and same_target
             explicit_match = bool(group_key and group_key == group.get("group_key"))
             both_global = group_key == "global-allocation" and group.get("group_key") == "global-allocation"
             if same_identity and (explicit_match or both_global or related_sources(first, decision)):
+                match = group
+                break
+            if not cross_entity or same_entity or not same_target:
+                continue
+            same_relation = business_relation_kind(first) == business_relation_kind(decision)
+            first_stores = _decision_stores(first)
+            decision_stores = _decision_stores(decision)
+            same_store_scope = bool(first_stores and first_stores == decision_stores)
+            explicit_bridge = bool(_source_bridges(first) & _source_bridges(decision))
+            same_root_or_bridge = bool(_decision_roots(first) & _decision_roots(decision)) or explicit_bridge
+            no_conflict = not _has_identity_or_evidence_conflict(first) and not _has_identity_or_evidence_conflict(decision)
+            no_competing_alternative = not first.get("alternatives") and not decision.get("alternatives")
+            if same_relation and same_store_scope and same_root_or_bridge and no_conflict and no_competing_alternative:
                 match = group
                 break
         if match is None:
@@ -763,9 +962,18 @@ def merge_inferred_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[s
                 "entity_type": item.get("entity_type"),
                 "sources": list(item.get("sources") or [item.get("source")]),
                 "candidate": item.get("candidate"),
+                "target_kind": item.get("target_kind") or ("store" if item.get("entity_type") == "store" else "product"),
+                "fact_family": item.get("fact_family"),
+                "semantic_root": item.get("semantic_root"),
+                "business_relation_kind": business_relation_kind(item),
+                "contexts": list(item.get("contexts") or []),
+                "mapping_sources": list(item.get("mapping_sources") or item.get("sources") or [item.get("source")]),
+                "supporting_evidence": list(item.get("supporting_evidence") or item.get("evidence") or []),
+                "run_only": bool(item.get("run_only")),
             }
             for item in items
         ]
+        first["business_relation_kind"] = business_relation_kind(first)
         target_kinds = {str(item.get("target_kind")) for item in items if item.get("target_kind")}
         if len(target_kinds) == 1:
             first["target_kind"] = next(iter(target_kinds))

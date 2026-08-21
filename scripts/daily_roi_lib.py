@@ -29,6 +29,7 @@ from evidence_resolution import (
     merge_inferred_decisions,
     resolve_entity,
     resolve_global_store_constraints,
+    union_cross_path_evidence,
 )
 from review_ux import parse_review_reply, persistence_eligibility, render_review_batch
 
@@ -820,11 +821,20 @@ def resolution_gate(decision: dict[str, Any], gate_type: str, *, context: dict[s
         "target": decision.get("candidate"),
     }
     evidence = {"resolution": decision, **(context or {})}
+    hint = dict(decision.get("useful_hint") or {})
+    if hint.get("evidence_status") == "AMOUNT_ONLY_HINT" and hint.get("candidate"):
+        question = (
+            f"“{label}”当前缺少独立店铺身份关系，不能自动归属。"
+            f"金额上唯一完全匹配的是“{hint['candidate']}”。"
+            f"请确认是否属于“{hint['candidate']}”，或提供正确店铺。"
+        )
+    else:
+        question = f"“{label}”应归属哪个{target_label}？"
     return make_gate(
         gate_type,
         "Evidence Resolution Layer could not produce a unique contradiction-free attribution",
         evidence,
-        f"“{label}”应归属哪个{target_label}？",
+        question,
         candidate=candidate,
         persistence=candidate,
     )
@@ -860,8 +870,10 @@ def _review_evidence_summary(decision: dict[str, Any]) -> list[str]:
 
 
 def make_review_batch(decisions: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    decision_list = list(decisions)
     items = []
-    merged_decisions = list(merge_inferred_decisions(decisions))
+    intra_entity_decisions = list(merge_inferred_decisions(decision_list, cross_entity=False))
+    merged_decisions = list(merge_inferred_decisions(decision_list, cross_entity=True))
     merged_decisions.sort(key=lambda item: (
         0 if item.get("alternatives") else (1 if item.get("review_risk") == "MEDIUM_REVIEW_RISK" else 2),
         " / ".join(str(value) for value in item.get("sources", [])),
@@ -872,12 +884,22 @@ def make_review_batch(decisions: Iterable[dict[str, Any]]) -> dict[str, Any] | N
         member_keys = [review_decision_key(item) for item in decision.get("member_decisions", [])] or [review_decision_key(decision)]
         stable = json.dumps([sources, proposal, member_keys], ensure_ascii=False, sort_keys=True)
         review_id = "RV-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:10]
+        member_decisions = list(decision.get("member_decisions") or [{
+            "entity_type": decision.get("entity_type"),
+            "sources": list(decision.get("mapping_sources") or sources),
+            "candidate": proposal,
+            "target_kind": decision.get("target_kind") or ("store" if decision.get("entity_type") == "store" else "product"),
+            "contexts": list(decision.get("contexts") or []),
+            "supporting_evidence": list(decision.get("supporting_evidence") or []),
+            "run_only": bool(decision.get("run_only")),
+        }])
         mapping_sources = list(decision.get("mapping_sources") or sources)
         resolution_candidate = {
             "entity_type": decision.get("entity_type"),
             "sources": mapping_sources,
             "target": proposal,
             "target_kind": decision.get("target_kind") or ("store" if decision.get("entity_type") == "store" else "product"),
+            "members": member_decisions,
         }
         item = {
             "number": index,
@@ -900,9 +922,38 @@ def make_review_batch(decisions: Iterable[dict[str, Any]]) -> dict[str, Any] | N
             "resolution_candidate": resolution_candidate,
             "member_keys": member_keys,
         }
-        eligibility = persistence_eligibility(item)
-        item["persistence_eligibility"] = eligibility
-        item["persistence_candidate"] = eligibility if eligibility["eligible"] else None
+        persistence_candidates = []
+        member_eligibilities = []
+        for member in member_decisions:
+            member_resolution = {
+                "entity_type": member.get("entity_type"),
+                "sources": list(member.get("mapping_sources") or member.get("sources") or []),
+                "target": proposal,
+                "target_kind": member.get("target_kind") or "product",
+            }
+            member_item = {
+                "resolution_candidate": member_resolution,
+                "proposed_answer": proposal,
+                "contexts": list(member.get("contexts") or []),
+                "supporting_evidence": list(member.get("supporting_evidence") or []),
+                "run_only": bool(member.get("run_only")),
+            }
+            eligibility = persistence_eligibility(member_item)
+            member_eligibilities.append({**eligibility, "member": member_resolution})
+            if eligibility["eligible"]:
+                persistence_candidates.append(eligibility)
+        item["persistence_eligibility"] = {
+            "eligible": bool(persistence_candidates),
+            "eligible_member_count": len(persistence_candidates),
+            "member_count": len(member_decisions),
+            "members": member_eligibilities,
+        }
+        item["persistence_candidates"] = persistence_candidates
+        item["persistence_candidate"] = (
+            {"eligible_members": persistence_candidates}
+            if persistence_candidates
+            else None
+        )
         items.append(item)
     if not items:
         return None
@@ -912,9 +963,34 @@ def make_review_batch(decisions: Iterable[dict[str, Any]]) -> dict[str, Any] | N
         "status": "INFERRED_REVIEW",
         "instructions": "可回复“全部接受”，或按编号接受、拒绝、改为实际答案。",
         "items": items,
+        "post_intra_entity_family_merge_count": len(intra_entity_decisions),
     }
     batch["review_ux"] = render_review_batch(batch)
     return batch
+
+
+def finalize_resolution_collection(
+    audit: dict[str, Any],
+    *,
+    human_gates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Refresh every human-facing count after the final resolution list is fixed."""
+    resolutions = list(audit.get("resolutions") or [])
+    verified = sum(item.get("decision") == VERIFIED for item in resolutions)
+    batch = audit.get("review_batch")
+    gates = list(human_gates or [])
+    if batch:
+        batch["review_ux"] = render_review_batch(batch, verified_records=verified, human_gates=gates)
+    summary = dict(audit.get("resolution_summary") or {})
+    summary.update(
+        verified=verified,
+        verified_count=verified,
+        inferred_review=len((batch or {}).get("items", [])),
+        inferred_review_count=len((batch or {}).get("items", [])),
+        post_intra_entity_family_merge_count=(batch or {}).get("post_intra_entity_family_merge_count", 0),
+    )
+    audit["resolution_summary"] = summary
+    return audit
 
 
 def filename_date_evidence(path: Path, internal_dates: set[str]) -> tuple[set[str], str]:
@@ -1394,7 +1470,7 @@ def build_golden_payload(
                 has_conflict = True
             else:
                 candidate_stores = [assigned_store]
-        if campaign["total_cents"] and candidate_stores:
+        if campaign["total_cents"]:
             global_facts.append({
                 "id": str(id(campaign)),
                 "source": campaign["name"],
@@ -1408,6 +1484,8 @@ def build_golden_payload(
         {store: canonical_ledger.get(store, {}).get("amount_cents", 0) for store in group_names},
     )
     global_store_decisions = dict(global_constraints.get("decisions") or {})
+    amount_only_hint = dict(global_constraints.get("amount_only_hint") or {})
+    amount_only_hint_assignments = dict(amount_only_hint.get("assignments") or {})
 
     for campaign in regular:
         regular_families = sorted({alias_family(item["plan"]) for item in campaign["records"] if item["cost_cents"] and alias_family(item["plan"])})
@@ -1516,7 +1594,7 @@ def build_golden_payload(
                     retain_decision(
                         decision,
                         gate_type="HG-06",
-                        context={"file": campaign["name"], "row": record["row"], "campaign": record["plan"], "amount": cents_text(record["cost_cents"])},
+                        context={"file": campaign["name"], "row": record["row"], "campaign": record["plan"], "amount": cents_text(record["cost_cents"]), "store": store},
                     )
             else:
                 product = retain_decision(decision, mapping_type="campaign", fact_family=f"campaign:{alias_family(record['plan'])}")
@@ -1538,6 +1616,13 @@ def build_golden_payload(
             decision["entity_type"] = "campaign"
             decision["mapping_sources"] = [regular_store_token]
             decision["target_kind"] = "store"
+            hinted_store = amount_only_hint_assignments.get(str(id(campaign)))
+            if hinted_store:
+                decision["useful_hint"] = {
+                    "evidence_status": "AMOUNT_ONLY_HINT",
+                    "candidate": hinted_store,
+                    "selected_answer": None,
+                }
             retain_decision(
                 decision,
                 gate_type="HG-06",
@@ -1688,6 +1773,16 @@ def build_golden_payload(
                 decision["fact_family"] = f"campaign:{source_token}"
                 decision["alternatives"] = candidates
                 decision["target_kind"] = "store"
+                decision["source"] = campaign["name"]
+                decision["sources"] = [campaign["name"]]
+                decision["mapping_sources"] = [source_token]
+                hinted_store = amount_only_hint_assignments.get(str(id(campaign)))
+                if hinted_store:
+                    decision["useful_hint"] = {
+                        "evidence_status": "AMOUNT_ONLY_HINT",
+                        "candidate": hinted_store,
+                        "selected_answer": None,
+                    }
                 retain_decision(
                     decision,
                     gate_type="HG-06",
@@ -1809,6 +1904,24 @@ def build_golden_payload(
             }
         sales_audit = {"reported_cents": sales["reported_cents"], "sku_sum_cents": source_total, "matched_count": len(template_skus & source_skus), "expected_template_sku_count": len(template_skus), "external_skus": sorted(source_skus - template_skus), "missing_skus": missing}
 
+    resolutions = union_cross_path_evidence(resolutions)
+    for decision in resolutions:
+        if decision.get("decision") != INFERRED_REVIEW:
+            continue
+        review_state = run_mappings.get(review_decision_key(decision))
+        if review_state == "rejected":
+            proposal = str(decision.get("candidate") or "")
+            decision["contradictions"] = [
+                *decision.get("contradictions", []),
+                {"type": "human_rejected_proposal", "proposal": proposal},
+            ]
+            decision["alternatives"] = list(dict.fromkeys([*decision.get("alternatives", []), proposal]))
+            decision["candidate"] = None
+            decision["decision"] = HUMAN_REQUIRED
+            decision.update(finalize_resolution(decision))
+    unresolved_decisions = [item for item in resolutions if item.get("decision") == HUMAN_REQUIRED]
+    review_decisions = [item for item in resolutions if item.get("decision") == INFERRED_REVIEW]
+
     for decision in merge_human_decisions(unresolved_decisions):
         gate_types = set(decision.get("gate_types", []))
         gate_type = "HG-05" if "HG-05" in gate_types else ("HG-01" if "HG-01" in gate_types else "HG-06")
@@ -1824,9 +1937,6 @@ def build_golden_payload(
         "roi_number_format": "0.00",
     }
     review_batch = make_review_batch(review_decisions)
-    verified_records = sum(item.get("decision") == VERIFIED for item in resolutions)
-    if review_batch:
-        review_batch["review_ux"] = render_review_batch(review_batch, verified_records=verified_records)
     merged_human = merge_human_decisions(unresolved_decisions)
     audit = {
         "target_date": target_date,
@@ -1840,16 +1950,17 @@ def build_golden_payload(
         "resolutions": resolutions,
         "review_batch": review_batch,
         "resolution_summary": {
-            "verified": verified_records,
+            "verified": 0,
             "machine_inferred": 0,
             "inferred_review": len((review_batch or {}).get("items", [])),
             "human_required": len(merged_human),
-            "verified_count": verified_records,
+            "verified_count": 0,
             "inferred_review_count": len((review_batch or {}).get("items", [])),
             "human_required_count": len(merged_human),
             "open_ended_human_decisions": len(merged_human),
         },
     }
+    finalize_resolution_collection(audit, human_gates=gates)
     return payload, audit, gates
 
 
@@ -1983,10 +2094,10 @@ def run_report(
                 "reconciliation": {"status": "PASS", "source_dates": business_dates},
             })
             audit["resolutions"].append(date_decision)
-            audit["resolution_summary"]["verified"] += 1
-            audit["resolution_summary"]["verified_count"] += 1
 
     unique_gates = {gate["gate_id"]: gate for gate in gates}
+    if audit is not None:
+        finalize_resolution_collection(audit, human_gates=list(unique_gates.values()))
     review_batch = (audit or {}).get("review_batch")
     pending_reviews = list((review_batch or {}).get("items", []))
     if unique_gates:
@@ -2164,9 +2275,12 @@ def resolve_review_batch(
         raise DailyRoiError("No pending inferred-review batch exists")
     if default_persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
         raise DailyRoiError(f"Invalid review persistence classification: {default_persistence}")
+    human_responses: list[dict[str, Any]] = []
     if reply_text is not None:
         try:
-            normalized = parse_review_reply(reply_text, batch)["responses"]
+            parsed_reply = parse_review_reply(reply_text, batch, human_gates=list(state.get("gates") or []))
+            normalized = parsed_reply["responses"]
+            human_responses = list(parsed_reply.get("human_responses") or [])
         except ValueError as exc:
             raise DailyRoiError(str(exc)) from exc
     elif accept_all:
@@ -2209,26 +2323,50 @@ def resolve_review_batch(
         if persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY", "ELIGIBLE_ONLY"}:
             raise DailyRoiError(f"Invalid review persistence classification: {persistence}")
         resolution = dict(item.get("resolution_candidate") or {})
-        entity_type = str(resolution.get("entity_type") or "")
-        sources = [str(value) for value in resolution.get("sources", []) if str(value or "").strip()]
+        members = list(resolution.get("members") or [resolution])
         target = str(item.get("proposed_answer") or "") if action == "ACCEPT" else str(response.get("target") or "").strip()
         if action == "CORRECT" and not target:
             raise DailyRoiError("CORRECT requires a non-empty target")
         if action in {"ACCEPT", "CORRECT"}:
-            if not entity_type or not sources:
+            if not members or any(
+                not str(member.get("entity_type") or "")
+                or not [str(value) for value in (member.get("mapping_sources") or member.get("sources") or []) if str(value or "").strip()]
+                for member in members
+            ):
                 raise DailyRoiError("This review item has no structured resolution target")
             validate_target(item, target)
         if persistence == "PERSISTENT_REUSABLE" and action in {"ACCEPT", "CORRECT"}:
-            if not item.get("persistence_candidate"):
+            legacy_durable = item.get("persistence_candidate") or {}
+            durable_members = list(item.get("persistence_candidates") or ([legacy_durable] if legacy_durable.get("entity_type") else []))
+            if not durable_members:
                 raise DailyRoiError("This inferred allocation is run-specific and is not eligible for durable memory")
-            for source in sources:
-                key = (entity_type, norm(source))
-                existing = memory.resolve(entity_type, source)
-                planned = planned_mappings.get(key)
-                correction_supersedes = action == "CORRECT" and existing and norm(existing) != norm(target)
-                if ((existing and norm(existing) != norm(target) and not correction_supersedes) or (planned and norm(planned) != norm(target))):
-                    raise DailyRoiError(f"Conflicting confirmed mapping for {source!r}")
-                planned_mappings[key] = target
+            for durable in durable_members:
+                entity_type = str(durable.get("entity_type") or "")
+                for source in durable.get("sources", []):
+                    key = (entity_type, norm(source))
+                    existing = memory.resolve(entity_type, source, scope=durable.get("scope"))
+                    planned = planned_mappings.get(key)
+                    correction_supersedes = action == "CORRECT" and existing and norm(existing) != norm(target)
+                    if ((existing and norm(existing) != norm(target) and not correction_supersedes) or (planned and norm(planned) != norm(target))):
+                        raise DailyRoiError(f"Conflicting confirmed mapping for {source!r}")
+                    planned_mappings[key] = target
+
+    pending_gates = {str(gate.get("gate_id")): gate for gate in state.get("gates", [])}
+    for response in human_responses:
+        gate_id = str(response.get("gate_id") or "")
+        gate = pending_gates.get(gate_id)
+        if not gate:
+            raise DailyRoiError(f"Human Gate not found: {gate_id}")
+        if response.get("action") not in {"CONFIRM_HINT", "CORRECT"}:
+            raise DailyRoiError(f"Unsupported Human Gate response: {response.get('action')}")
+        target = str(response.get("target") or "").strip()
+        candidate = dict(gate.get("candidate_resolution") or {})
+        sources = [str(value) for value in candidate.get("sources", []) if str(value or "").strip()]
+        if not target or not candidate.get("entity_type") or not sources:
+            raise DailyRoiError("Human Gate reply has no structured mapping target")
+        allowed_stores = [str(group.get("store") or "") for group in (state.get("template_model") or {}).get("store_groups", [])]
+        if allowed_stores and norm(target) not in {norm(value) for value in allowed_stores}:
+            raise DailyRoiError(f"Human Gate target is not present in the current TemplateModel: {target}")
 
     metrics = dict(state.get("review_metrics") or {})
     metrics.setdefault("review_accept_count", 0)
@@ -2249,8 +2387,13 @@ def resolve_review_batch(
             raise DailyRoiError(f"Invalid review persistence classification: {persistence}")
         proposal = str(item.get("proposed_answer") or "")
         resolution = dict(item.get("resolution_candidate") or {})
-        mapping_sources = [str(value) for value in resolution.get("sources", []) if str(value or "").strip()]
-        entity_type = str(resolution.get("entity_type") or "")
+        members = list(resolution.get("members") or [resolution])
+        mapping_sources = list(dict.fromkeys(
+            str(value)
+            for member in members
+            for value in (member.get("mapping_sources") or member.get("sources") or [])
+            if str(value or "").strip()
+        ))
         confirmation = {
             "review_id": review_id,
             "batch_id": batch.get("batch_id"),
@@ -2259,22 +2402,28 @@ def resolve_review_batch(
             "proposal": proposal,
             "at": now_iso(),
         }
-        durable = item.get("persistence_candidate")
+        legacy_durable = item.get("persistence_candidate") or {}
+        durable_members = list(item.get("persistence_candidates") or ([legacy_durable] if legacy_durable.get("entity_type") else []))
         remember_requested = persistence in {"PERSISTENT_REUSABLE", "ELIGIBLE_ONLY"}
-        persist_mapping = bool(remember_requested and durable)
-        if remember_requested and not durable:
-            metrics["run_only_not_persisted"] += 1
+        persist_mapping = bool(remember_requested and durable_members)
+        if remember_requested:
+            metrics["run_only_not_persisted"] += max(0, len(members) - len(durable_members))
         if action == "ACCEPT":
             for key in item.get("member_keys", []):
                 state.setdefault("run_mappings", {})[str(key)] = "accepted"
+            for member in members:
+                entity_type = str(member.get("entity_type") or "")
+                for source in member.get("mapping_sources") or member.get("sources") or []:
+                    state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = proposal
             if persist_mapping:
-                for source in durable.get("sources", []):
-                    memory.add_mapping(
-                        str(durable["entity_type"]), str(source), proposal, gate_id=review_id,
-                        memory_type=durable.get("memory_type"), scope=durable.get("scope"),
-                        confirmation_mode="REVIEW_ACCEPT", original_proposal=proposal,
-                        evidence_at_confirmation=item.get("evidence_summary", []), source_run=state.get("run_id"),
-                    )
+                for durable in durable_members:
+                    for source in durable.get("sources", []):
+                        memory.add_mapping(
+                            str(durable["entity_type"]), str(source), proposal, gate_id=review_id,
+                            memory_type=durable.get("memory_type"), scope=durable.get("scope"),
+                            confirmation_mode="REVIEW_ACCEPT", original_proposal=proposal,
+                            evidence_at_confirmation=item.get("evidence_summary", []), source_run=state.get("run_id"),
+                        )
                 metrics["review_accept_persisted"] += 1
             metrics["review_accept_count"] += 1
             confirmation.update(
@@ -2286,18 +2435,22 @@ def resolve_review_batch(
             target = str(response.get("target") or "").strip()
             if not target:
                 raise DailyRoiError("CORRECT requires a non-empty target")
-            if not entity_type or not mapping_sources:
+            if not members or not mapping_sources:
                 raise DailyRoiError("This review item has no structured correction target")
-            for source in mapping_sources:
-                state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = target
-                if persist_mapping:
-                    memory.add_mapping(
-                        entity_type, source, target, gate_id=review_id,
-                        memory_type=durable.get("memory_type"), scope=durable.get("scope"),
-                        confirmation_mode="HUMAN_CORRECTION", original_proposal=proposal,
-                        evidence_at_confirmation=item.get("evidence_summary", []), source_run=state.get("run_id"),
-                        supersede=True,
-                    )
+            for member in members:
+                entity_type = str(member.get("entity_type") or "")
+                for source in member.get("mapping_sources") or member.get("sources") or []:
+                    state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = target
+            if persist_mapping:
+                for durable in durable_members:
+                    for source in durable.get("sources", []):
+                        memory.add_mapping(
+                            str(durable["entity_type"]), str(source), target, gate_id=review_id,
+                            memory_type=durable.get("memory_type"), scope=durable.get("scope"),
+                            confirmation_mode="HUMAN_CORRECTION", original_proposal=proposal,
+                            evidence_at_confirmation=item.get("evidence_summary", []), source_run=state.get("run_id"),
+                            supersede=True,
+                        )
             if persist_mapping:
                 metrics["human_correction_persisted"] += 1
             metrics["review_correct_count"] += 1
@@ -2321,8 +2474,31 @@ def resolve_review_batch(
             raise DailyRoiError(f"Unsupported review action: {action}")
         append_jsonl(paths.confirmations, confirmation)
 
+    resolved_gate_ids = set()
+    for response in human_responses:
+        gate_id = str(response["gate_id"])
+        gate = pending_gates[gate_id]
+        candidate = dict(gate.get("candidate_resolution") or {})
+        target = str(response["target"])
+        entity_type = str(candidate["entity_type"])
+        sources = [str(value) for value in candidate.get("sources", []) if str(value or "").strip()]
+        for source in sources:
+            state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = target
+        append_jsonl(paths.confirmations, {
+            "gate_id": gate_id,
+            "decision_type": "HUMAN_CONFIRMED",
+            "classification": "RUN_ONLY",
+            "action": response.get("action"),
+            "evidence_status": response.get("evidence_status"),
+            "at": now_iso(),
+            "resolution": {**candidate, "target": target},
+        })
+        resolved_gate_ids.add(gate_id)
+
     state["review_metrics"] = metrics
     state["review_batch"] = None
+    if resolved_gate_ids:
+        state["gates"] = [gate for gate in state.get("gates", []) if str(gate.get("gate_id")) not in resolved_gate_ids]
     state["updated_at"] = now_iso()
     atomic_json(paths.current_run, state)
     return run_report(
