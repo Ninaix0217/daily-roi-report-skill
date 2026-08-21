@@ -73,7 +73,7 @@ For direct CLI use:
 python scripts/daily_roi.py run --workspace <WORKSPACE> --input-dir <INPUT_DIR> --output-dir <OUTPUT_DIR> --node <NODE> --node-modules <NODE_MODULES>
 ```
 
-Use `status`, `memory`, `review`, and `resolve` subcommands to inspect or resume a run. `review --accept-all` approves a complete run-only review batch; `review --responses-json <file>` handles mixed accepts, rejections, and corrections in one resume.
+Use `status`, `memory`, `review`, and `resolve` subcommands to inspect or resume a run. `review --reply "全部接受"` approves only the displayed batch for the current run; wording such as “能记的记住” persists only mappings that pass durability and scope policy. Numbered natural corrections, `--accept-all`, and `--responses-json <file>` are also supported.
 
 ## Local memory
 

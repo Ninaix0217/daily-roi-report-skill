@@ -12,7 +12,7 @@ The implementation preserves the Baseline order as seven resumable phases.
 ## PREFLIGHT
 
 - Compare all business-source dates. A conflict between business sources is always a Human Gate.
-- A stale template date may be auto-updated only when all business sources agree and the workspace memory contains the controlled confirmed rule.
+- A stale template date is auto-updated by Shared Core when all effective business sources agree on one date and only the template differs. Business-source date conflict remains `HUMAN_REQUIRED`; this rule is never Local Memory.
 - Find exact-file duplicates and record-level duplicate evidence.
 - Run Evidence Resolution: unified deterministic product identity, structural rules, bounded semantic/context candidates, cross-file corroboration, unique global cent constraints, contradiction checks, and reconciliation consequences.
 - Record `VERIFIED`, `INFERRED_REVIEW`, and `HUMAN_REQUIRED` decisions with evidence provenance. Coalesce inferred records into one review batch and unresolved facts into separate Human Gates.
@@ -22,7 +22,7 @@ The implementation preserves the Baseline order as seven resumable phases.
 
 - Present all `INFERRED_REVIEW` proposals together. Require explicit accept/reject/correct decisions for the whole batch, apply them once, and resume once.
 - Validate a human response against the gate's structured candidate.
-- Apply one grouped response to every source in the same confirmed alias family; do not ask separately for dependent internal blockers.
+- Apply one grouped response to every source in the same independent business decision, including semantic siblings that cross raw alias families; do not ask separately for dependent internal blockers.
 - Classify it as persistent reusable, run-only, or rejected.
 - Append an auditable confirmation record. Persist only eligible human-confirmed reusable facts.
 - Resume the same run ID. Reread inputs and rerun deterministic checks where necessary to ensure source files did not silently change.

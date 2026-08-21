@@ -35,6 +35,7 @@ def summary(state: dict) -> dict:
         "gates": state.get("gates", []),
         "inferred_review_count": len(((state.get("review_batch") or {}).get("items") or [])),
         "review_batch": state.get("review_batch"),
+        "review_ux": ((state.get("review_batch") or {}).get("review_ux")),
         "review_metrics": reviews,
         "resolution_summary": decisions,
         "VERIFIED_COUNT": decisions.get("verified_count", decisions.get("verified", 0)),
@@ -44,6 +45,10 @@ def summary(state: dict) -> dict:
         "REVIEW_ACCEPT_COUNT": reviews.get("review_accept_count", 0),
         "REVIEW_REJECT_COUNT": reviews.get("review_reject_count", 0),
         "REVIEW_CORRECT_COUNT": reviews.get("review_correct_count", 0),
+        "MEMORY_CANDIDATES": reviews.get("memory_candidates", 0),
+        "DURABLE_MEMORY_ELIGIBLE": reviews.get("durable_memory_eligible", 0),
+        "RUN_ONLY_NOT_PERSISTED": reviews.get("run_only_not_persisted", 0),
+        "REJECTED_PROPOSALS_PERSISTED_AS_FACT": reviews.get("rejected_proposals_persisted_as_fact", 0),
         "financial_total": _money(audit.get("financial_total_cents")),
         "product_expense_total": _money(audit.get("product_expense_total_cents")),
         "expense_difference": _money(audit.get("expense_difference_cents")),
@@ -90,6 +95,7 @@ def parser() -> argparse.ArgumentParser:
     response_group = review.add_mutually_exclusive_group(required=True)
     response_group.add_argument("--responses-json", type=Path)
     response_group.add_argument("--accept-all", action="store_true")
+    response_group.add_argument("--reply", help="Natural-language reply for the currently displayed review batch")
     review.add_argument("--persistence", choices=["PERSISTENT_REUSABLE", "RUN_ONLY"], default="RUN_ONLY")
     review.add_argument("--node")
     review.add_argument("--node-modules")
@@ -131,6 +137,7 @@ def main() -> int:
             state = resolve_review_batch(
                 args.workspace,
                 responses,
+                reply_text=args.reply,
                 accept_all=args.accept_all,
                 default_persistence=args.persistence,
                 node=args.node,

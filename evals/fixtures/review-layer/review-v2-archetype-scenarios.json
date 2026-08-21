@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "fixture_class": "SIMULATED_ARCHETYPE_SCENARIOS",
+  "evidence_class": "SIMULATED",
+  "historical_basis": "REAL_OBSERVED_FAILURE_SHAPE",
+  "source_release": ["RC1", "RC2", "RC3"],
+  "original_run_retained": false,
+  "purpose": "regression_and_architecture_acceptance",
+  "limitations": [
+    "does not reproduce original company files",
+    "does not reproduce original amounts or aliases",
+    "does not reproduce a complete external run",
+    "is not runtime evidence or local memory"
+  ],
+  "contains_private_business_data": false,
+  "render_context": {
+    "verified_records": 5
+  },
+  "review_groups": [
+    {"sources": ["青木", "青木1", "青木3"], "candidate": "青木液", "risk": "LOW_REVIEW_RISK"},
+    {"sources": ["松露", "松露单", "松露3"], "candidate": "松露膏", "risk": "LOW_REVIEW_RISK"},
+    {"sources": ["云纱", "云纱1"], "candidate": "云纱液", "risk": "LOW_REVIEW_RISK"},
+    {"sources": ["蓝叶", "蓝叶1", "蓝叶3"], "candidate": "蓝叶膏", "risk": "LOW_REVIEW_RISK"},
+    {"sources": ["静岚棒", "静岚1", "静岚3"], "candidate": "静岚棒", "risk": "LOW_REVIEW_RISK"},
+    {"sources": ["短青1", "短青3"], "candidate": "短青液", "excluded_equal_candidate": "白石膏", "risk": "LOW_REVIEW_RISK"},
+    {"sources": ["新蓝叶器", "新蓝叶器单盒", "新蓝叶器三盒"], "candidate": "蓝叶器", "alternative": "蓝叶贴", "risk": "MEDIUM_REVIEW_RISK"}
+  ],
+  "global": {
+    "files": [
+      {"id": "site-a", "source": "site-a.csv", "total_cents": 11111, "candidate_stores": ["Example Store-A"], "products": ["Example Product-A"]},
+      {"id": "store-b", "source": "store-b.csv", "total_cents": 22222, "candidate_stores": ["Example Store-A"], "products": ["Example Product-A"]}
+    ],
+    "ledger_totals": {"Example Store-A": 33333}
+  },
+  "expected": {
+    "independent_review_decisions": 8,
+    "prefilled_review_decisions": 8,
+    "prefilled_review_rate": 1.0,
+    "open_ended_human_decisions": 0,
+    "memory_candidates": 7,
+    "durable_memory_eligible": 7,
+    "run_only_decisions": 1
+  }
+}

@@ -1,25 +1,35 @@
-# Memory model
+# Memory Layer v2
 
-Local Memory v0 is a small schema-controlled file, not a free-form knowledge base.
+Local Memory is a small workspace-owned evidence store, not a free-form knowledge base. Shared Core rules, durable local facts, and current Run State are separate layers.
 
-## Entity mapping
+## Durable facts
 
-Only `store`, `product`, `campaign`, and `sku` mappings are accepted. Every durable item records confirmed status, `human_confirmation` provenance, timestamp, and originating gate. A conflicting mapping fails closed.
+Memory types are `ENTITY_MAPPING`, `PLAN_PATTERN`, `STORE_MAPPING`, and the narrowly reserved `WORKFLOW_PREFERENCE`. Every active fact records an explicit scope, human confirmation mode, original proposal, compact evidence summary, source run/decision, timestamps, and lineage. Rejected proposals live in a separate audit collection and set `creates_business_fact=false`.
 
-## Workflow rule
+The persistence policy first checks whether a decision is stable, target-identifiable, contradiction-free, and safely scoped. Current-day amounts, generic full-store filenames, and global allocation results are run-only even when the user asks to remember eligible facts. “全部接受” is run-only; “能记的记住” runs this eligibility policy.
 
-The only v0 rule is `auto_update_stale_template_date`. Its condition and action are fixed by schema: all business sources must agree on one date, the template alone differs, and the action updates only the template date. It cannot bypass a business-source date conflict.
+## Scope and reuse
 
-## Persistence decision
+The minimum safe scope may include workspace, store, account, platform, template family, campaign namespace, or source type. A scoped hit is ignored outside that context. Before reuse, the resolver checks scope applicability, target existence, and current hard-identity contradictions.
 
-- `PERSISTENT_REUSABLE`: write eligible structured fact/rule to memory and apply it to the run.
-- `RUN_ONLY`: write only to current run mappings and confirmation audit.
-- `REJECTED`: audit the rejection and retain the blocker.
+Evidence precedence is:
 
-AI-generated candidates are questions, never memory. Natural-language summaries are not accepted by the memory writer.
+1. current hard identity;
+2. scoped historical human-confirmed memory;
+3. current weak semantic inference.
+
+Hard-identity conflict never allows memory to override the current target. The conflict is audited and the memory item transitions to `CONFLICTED` for human handling.
+
+## Lifecycle and provenance
+
+Lifecycle states are `ACTIVE`, `SUPERSEDED`, `CONFLICTED`, and `RETIRED`. A human correction creates a new active fact and links it to the superseded item; history is not erased. There is no fixed TTL. Invalidation is evidence-triggered by identity conflict, missing targets, scope change, explicit correction, or a newer deterministic relationship.
+
+`REVIEW_ACCEPT` retains the AI proposal as the confirmed target. `HUMAN_CORRECTION` retains the rejected proposal but persists only the human-supplied target. A bare rejection creates audit provenance and returns the decision to unresolved state.
+
+Lineage IDs prevent the same historical inference, its confirmation, and restated semantic evidence from being counted as independent support.
 
 ## Isolation and reset
 
-The state root is resolved from the selected workspace. Two workspaces therefore read and write different `.daily-roi` directories. Skill upgrades do not touch either directory. The default reset removes memory and current run only; audit removal requires the explicit `--include-audit` option.
+The state root is `<workspace>/.daily-roi/`; separate workspaces do not share memory. Skill upgrades do not touch runtime state. The default reset removes memory and current run only; audit removal requires explicit `--include-audit`.
 
 Schemas: [`memory.schema.json`](../schemas/memory.schema.json), [`human-gate.schema.json`](../schemas/human-gate.schema.json), and [`run-state.schema.json`](../schemas/run-state.schema.json).

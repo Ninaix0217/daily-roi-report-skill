@@ -1,27 +1,42 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/daily-roi/memory.schema.json",
-  "title": "Daily ROI local memory v1",
+  "title": "Daily ROI local memory v1-v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "entity_mappings", "workflow_rules"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "enum": [1, 2] },
     "entity_mappings": {
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": ["kind", "entity_type", "source", "target", "status", "source_type"],
         "properties": {
           "kind": { "const": "entity_mapping" },
+          "memory_id": { "type": "string" },
+          "memory_type": { "enum": ["ENTITY_MAPPING", "PLAN_PATTERN", "STORE_MAPPING", "WORKFLOW_PREFERENCE"] },
           "entity_type": { "enum": ["store", "product", "campaign", "sku"] },
           "source": { "type": "string", "minLength": 1 },
           "target": { "type": "string", "minLength": 1 },
-          "status": { "const": "confirmed" },
+          "status": { "enum": ["confirmed", "ACTIVE", "SUPERSEDED", "CONFLICTED", "RETIRED"] },
           "source_type": { "const": "human_confirmation" },
+          "scope": { "type": "object", "additionalProperties": { "type": "string" } },
+          "confirmation_mode": { "enum": ["REVIEW_ACCEPT", "HUMAN_CORRECTION", "HUMAN_GATE_CONFIRM"] },
+          "created_at": { "type": "string" },
           "confirmed_at": { "type": "string" },
-          "gate_id": { "type": "string", "minLength": 1 }
+          "last_used": { "type": ["string", "null"] },
+          "use_count": { "type": "integer", "minimum": 0 },
+          "original_proposal": { "type": ["string", "null"] },
+          "proposal_rejected": { "type": "boolean" },
+          "evidence_at_confirmation": { "type": "array" },
+          "source_run": { "type": ["string", "null"] },
+          "decision_id": { "type": ["string", "null"] },
+          "lineage_id": { "type": ["string", "null"] },
+          "gate_id": { "type": "string", "minLength": 1 },
+          "supersedes": { "type": "string" },
+          "superseded_by": { "type": "string" },
+          "superseded_at": { "type": "string" }
         }
       }
     },
@@ -29,7 +44,6 @@
       "type": "array",
       "items": {
         "type": "object",
-        "additionalProperties": false,
         "required": ["kind", "rule", "condition", "action", "status", "source_type"],
         "properties": {
           "kind": { "const": "workflow_rule" },
@@ -42,6 +56,47 @@
           "gate_id": { "type": "string", "minLength": 1 }
         }
       }
+    },
+    "rejected_proposals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "decision_id", "sources", "proposal", "status", "created_at", "creates_business_fact"],
+        "properties": {
+          "kind": { "const": "rejected_proposal" },
+          "decision_id": { "type": "string" },
+          "sources": { "type": "array", "items": { "type": "string" } },
+          "proposal": { "type": "string" },
+          "status": { "const": "REJECTED" },
+          "created_at": { "type": "string" },
+          "source_run": { "type": ["string", "null"] },
+          "creates_business_fact": { "const": false }
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "schema_version": { "const": 1 } } },
+      "then": {
+        "properties": {
+          "entity_mappings": { "items": { "properties": { "status": { "const": "confirmed" } } } }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "schema_version": { "const": 2 } } },
+      "then": {
+        "required": ["rejected_proposals"],
+        "properties": {
+          "entity_mappings": {
+            "items": {
+              "required": ["memory_id", "memory_type", "scope", "confirmation_mode", "created_at", "use_count", "evidence_at_confirmation", "decision_id", "lineage_id"],
+              "properties": { "status": { "enum": ["ACTIVE", "SUPERSEDED", "CONFLICTED", "RETIRED"] } }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

@@ -10,12 +10,12 @@
 | Current/run state | Employee workspace | `<workspace>/.daily-roi/current-run.json` and `runs/` | task/audit state, never default knowledge |
 | Golden fixtures | Developer | `evals/` | test only |
 
-Memory v1 accepts confirmed entity mappings for `store`, `product`, `campaign`, and `sku`, plus the single controlled rule `auto_update_stale_template_date`. It rejects candidate status, unreviewed inference, free-form rules, and conflicting mappings. An accepted or corrected Review becomes `HUMAN_CONFIRMED`; only an explicitly reusable, schema-eligible mapping may then enter durable memory. Run-specific global allocations never become durable mappings.
+Memory v2 accepts scoped, human-confirmed `ENTITY_MAPPING`, `PLAN_PATTERN`, and `STORE_MAPPING` facts. A local `WORKFLOW_PREFERENCE` type is reserved for genuinely environment-specific behavior; the stale-template date rule is now Shared Core and is never Local Memory. Items carry `ACTIVE`, `SUPERSEDED`, `CONFLICTED`, or `RETIRED` lifecycle state plus review/correction provenance. Run-specific global allocations never become durable mappings.
 
 ## Gate policy
 
 - `HG-01`: unknown nonzero entity mapping.
-- `HG-02`: business-source date conflict or unconfirmed stale-template policy.
+- `HG-02`: business-source date conflict or missing target date. A uniquely consistent business date auto-updates a stale template as `VERIFIED`.
 - `HG-03`: suspected duplicate without sufficient identity proof.
 - `HG-04`: expense/store/sales reconciliation failure.
 - `HG-05`: template-external nonzero SKU or incomplete template SKU coverage.
@@ -31,7 +31,9 @@ Each gate stores an ID, type, blocking reason, evidence, alternatives/contradict
 - `CORRECT`: reject the proposal, validate the supplied target against the current TemplateModel, and persist only the corrected target when eligible.
 - `REJECT`: do not persist the proposal; resume into `HUMAN_REQUIRED` for the unresolved fact.
 
-All pending Review items must be answered before one resume. Missing answers never imply acceptance.
+All pending Review items must be answered before one resume. Missing answers never imply acceptance. The natural reply parser accepts “全部接受”, remember-eligible variants, numbered corrections, and mixed accept/correct wording, but always binds the response to the current displayed batch.
+
+“全部接受” is run-only by default. Wording such as “能记的记住” requests an eligibility check rather than unconditional persistence. Stable mappings with a safely inferred scope may persist; amount-dependent/current-file allocation does not. A bare rejection creates rejected-proposal audit provenance, not a new mapping fact.
 
 The CLI response file is deliberately small and structured:
 
@@ -49,6 +51,6 @@ The CLI response file is deliberately small and structured:
 - `RUN_ONLY`: apply to `current-run.json` only, append audit, and resume.
 - `REJECTED`: append the rejection; do not mutate memory and do not bypass the blocker.
 
-A grouped mapping contains all equivalent sources. One confirmation applies to every listed source; persistence writes each exact source mapping separately so later exact lookup remains deterministic.
+A grouped mapping contains all equivalent sources. One confirmation applies to every listed source; persistence writes each exact source mapping separately so later exact lookup remains deterministic. Current hard identity outranks historical memory; a conflict is surfaced and the old item becomes `CONFLICTED` rather than silently winning. Human correction supersedes the prior active item without deleting its provenance.
 
 The resume operation retains the run ID and run mappings, rereads inputs, and recomputes deterministic checks. This avoids restarting conversational analysis while detecting source mutations.

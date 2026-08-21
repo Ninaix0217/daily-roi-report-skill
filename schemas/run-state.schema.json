@@ -19,7 +19,13 @@
       "properties": {
         "review_accept_count": { "type": "integer", "minimum": 0 },
         "review_reject_count": { "type": "integer", "minimum": 0 },
-        "review_correct_count": { "type": "integer", "minimum": 0 }
+        "review_correct_count": { "type": "integer", "minimum": 0 },
+        "memory_candidates": { "type": "integer", "minimum": 0 },
+        "durable_memory_eligible": { "type": "integer", "minimum": 0 },
+        "run_only_not_persisted": { "type": "integer", "minimum": 0 },
+        "review_accept_persisted": { "type": "integer", "minimum": 0 },
+        "human_correction_persisted": { "type": "integer", "minimum": 0 },
+        "rejected_proposals_persisted_as_fact": { "const": 0 }
       }
     },
     "run_mappings": { "type": "object", "additionalProperties": { "type": "string" } },

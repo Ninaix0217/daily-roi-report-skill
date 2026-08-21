@@ -30,6 +30,7 @@ from evidence_resolution import (
     resolve_entity,
     resolve_global_store_constraints,
 )
+from review_ux import parse_review_reply, persistence_eligibility, render_review_batch
 
 
 MONEY = Decimal("0.01")
@@ -39,6 +40,8 @@ CONFIRMATIONS_FILE = "confirmations.jsonl"
 CURRENT_RUN_FILE = "current-run.json"
 SUPPORTED_MAPPING_TYPES = {"store", "product", "campaign", "sku"}
 WORKFLOW_RULE_STALE_TEMPLATE = "auto_update_stale_template_date"
+MEMORY_TYPES = {"ENTITY_MAPPING", "PLAN_PATTERN", "STORE_MAPPING", "WORKFLOW_PREFERENCE"}
+MEMORY_STATUSES = {"ACTIVE", "SUPERSEDED", "CONFLICTED", "RETIRED"}
 SOURCE_DATE_RE = re.compile(r"(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)")
 
 
@@ -121,24 +124,59 @@ class LocalMemory:
 
     def _load(self) -> dict[str, Any]:
         if not self.paths.memory.exists():
-            return {"schema_version": 1, "entity_mappings": [], "workflow_rules": []}
+            return {"schema_version": 2, "entity_mappings": [], "workflow_rules": [], "rejected_proposals": []}
         data = json.loads(self.paths.memory.read_text(encoding="utf-8"))
         self.validate(data)
+        if data.get("schema_version") == 1:
+            data = self._migrate_v1(data)
         return data
+
+    def _migrate_v1(self, data: dict[str, Any]) -> dict[str, Any]:
+        migrated = {"schema_version": 2, "entity_mappings": [], "workflow_rules": list(data.get("workflow_rules", [])), "rejected_proposals": []}
+        for item in data.get("entity_mappings", []):
+            entity_type = str(item["entity_type"])
+            migrated["entity_mappings"].append({
+                **item,
+                "memory_id": item.get("memory_id") or "MEM-" + hashlib.sha256(
+                    json.dumps([entity_type, item["source"], item["target"], item.get("gate_id")], ensure_ascii=False).encode("utf-8")
+                ).hexdigest()[:12],
+                "memory_type": self.memory_type_for(entity_type),
+                "status": "ACTIVE",
+                "scope": {"workspace": str(self.paths.workspace)},
+                "confirmation_mode": "HUMAN_CORRECTION",
+                "created_at": item.get("confirmed_at") or now_iso(),
+                "last_used": None,
+                "use_count": 0,
+                "original_proposal": None,
+                "evidence_at_confirmation": [],
+                "source_run": None,
+                "decision_id": item.get("gate_id"),
+                "lineage_id": item.get("gate_id") or None,
+            })
+        return migrated
 
     @staticmethod
     def validate(data: dict[str, Any]) -> None:
-        if data.get("schema_version") != 1:
+        version = data.get("schema_version")
+        if version not in {1, 2}:
             raise DailyRoiError("Unsupported local memory schema_version")
         if not isinstance(data.get("entity_mappings"), list) or not isinstance(data.get("workflow_rules"), list):
             raise DailyRoiError("Invalid local memory collections")
+        if version == 2 and not isinstance(data.get("rejected_proposals"), list):
+            raise DailyRoiError("Invalid rejected proposal audit collection")
         for item in data["entity_mappings"]:
             if item.get("kind") != "entity_mapping" or item.get("entity_type") not in SUPPORTED_MAPPING_TYPES:
                 raise DailyRoiError(f"Invalid entity mapping: {item}")
-            if item.get("status") != "confirmed" or item.get("source_type") != "human_confirmation":
+            allowed_status = {"confirmed"} if version == 1 else MEMORY_STATUSES
+            if item.get("status") not in allowed_status or item.get("source_type") != "human_confirmation":
                 raise DailyRoiError("Only human-confirmed mappings may be durable")
             if not str(item.get("source", "")).strip() or not str(item.get("target", "")).strip():
                 raise DailyRoiError("Mapping source and target are required")
+            if version == 2:
+                if item.get("memory_type") not in MEMORY_TYPES or not isinstance(item.get("scope"), dict):
+                    raise DailyRoiError("Memory v2 mappings require a type and explicit scope")
+                if item.get("confirmation_mode") not in {"REVIEW_ACCEPT", "HUMAN_CORRECTION", "HUMAN_GATE_CONFIRM"}:
+                    raise DailyRoiError("Invalid memory confirmation mode")
         for item in data["workflow_rules"]:
             if item.get("kind") != "workflow_rule" or item.get("status") != "confirmed":
                 raise DailyRoiError(f"Invalid workflow rule: {item}")
@@ -149,35 +187,146 @@ class LocalMemory:
         self.validate(self.data)
         atomic_json(self.paths.memory, self.data)
 
-    def resolve(self, entity_type: str, source: str) -> str | None:
+    @staticmethod
+    def memory_type_for(entity_type: str) -> str:
+        return {"campaign": "PLAN_PATTERN", "store": "STORE_MAPPING"}.get(entity_type, "ENTITY_MAPPING")
+
+    @staticmethod
+    def _scope_applies(stored: dict[str, Any], current: dict[str, Any] | None) -> bool:
+        current = current or {}
+        for key, value in stored.items():
+            if key == "workspace" and key not in current:
+                continue
+            if key not in current or norm(current[key]) != norm(value):
+                return False
+        return True
+
+    def find(self, entity_type: str, source: str, *, scope: dict[str, Any] | None = None) -> dict[str, Any] | None:
         wanted = norm(source)
         for item in reversed(self.data["entity_mappings"]):
-            if item["entity_type"] == entity_type and norm(item["source"]) == wanted:
-                return str(item["target"])
+            active = item.get("status") in {"confirmed", "ACTIVE"}
+            if active and item["entity_type"] == entity_type and norm(item["source"]) == wanted and self._scope_applies(item.get("scope", {}), scope):
+                return item
         return None
+
+    def resolve(
+        self,
+        entity_type: str,
+        source: str,
+        *,
+        scope: dict[str, Any] | None = None,
+        valid_targets: Iterable[str] | None = None,
+        hard_identity_target: str | None = None,
+    ) -> str | None:
+        item = self.find(entity_type, source, scope=scope)
+        if not item:
+            return None
+        target = str(item["target"])
+        if valid_targets is not None and norm(target) not in {norm(value) for value in valid_targets}:
+            item["status"] = "RETIRED"
+            item["retired_at"] = now_iso()
+            item["retired_reason"] = "target_absent_from_current_template"
+            self.save()
+            return None
+        if hard_identity_target and norm(hard_identity_target) != norm(target):
+            self.mark_conflicted(str(item.get("memory_id") or ""), current_hard_target=hard_identity_target)
+            return None
+        return target
 
     def has_rule(self, rule: str) -> bool:
         return any(item.get("rule") == rule and item.get("status") == "confirmed" for item in self.data["workflow_rules"])
 
-    def add_mapping(self, entity_type: str, source: str, target: str, *, gate_id: str) -> None:
+    def add_mapping(
+        self,
+        entity_type: str,
+        source: str,
+        target: str,
+        *,
+        gate_id: str,
+        memory_type: str | None = None,
+        scope: dict[str, Any] | None = None,
+        confirmation_mode: str = "HUMAN_GATE_CONFIRM",
+        original_proposal: str | None = None,
+        evidence_at_confirmation: Iterable[Any] = (),
+        source_run: str | None = None,
+        supersede: bool = False,
+    ) -> dict[str, Any]:
         if entity_type not in SUPPORTED_MAPPING_TYPES:
             raise DailyRoiError(f"Unsupported mapping entity_type: {entity_type}")
-        current = self.resolve(entity_type, source)
-        if current and norm(current) != norm(target):
-            raise DailyRoiError(f"Conflicting confirmed mapping for {source!r}: {current!r} vs {target!r}")
-        if current:
-            return
-        self.data["entity_mappings"].append({
+        memory_type = memory_type or self.memory_type_for(entity_type)
+        if memory_type not in MEMORY_TYPES:
+            raise DailyRoiError(f"Unsupported memory_type: {memory_type}")
+        memory_scope = {"workspace": str(self.paths.workspace), **(scope or {})}
+        current_item = self.find(entity_type, source, scope=memory_scope)
+        previous_item = next((
+            item for item in reversed(self.data["entity_mappings"])
+            if item.get("entity_type") == entity_type
+            and norm(item.get("source")) == norm(source)
+            and self._scope_applies(item.get("scope", {}), memory_scope)
+        ), None)
+        if current_item and norm(current_item["target"]) != norm(target):
+            if not supersede:
+                raise DailyRoiError(f"Conflicting confirmed mapping for {source!r}: {current_item['target']!r} vs {target!r}")
+            current_item["status"] = "SUPERSEDED"
+            current_item["superseded_at"] = now_iso()
+        elif current_item:
+            return current_item
+        created_at = now_iso()
+        memory_id = "MEM-" + hashlib.sha256(json.dumps(
+            [entity_type, norm(source), norm(target), memory_scope, gate_id, created_at], ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")).hexdigest()[:12]
+        item = {
             "kind": "entity_mapping",
+            "memory_id": memory_id,
+            "memory_type": memory_type,
             "entity_type": entity_type,
             "source": source,
             "target": target,
-            "status": "confirmed",
+            "status": "ACTIVE",
             "source_type": "human_confirmation",
-            "confirmed_at": now_iso(),
+            "scope": memory_scope,
+            "confirmation_mode": confirmation_mode,
+            "created_at": created_at,
+            "confirmed_at": created_at,
+            "last_used": None,
+            "use_count": 0,
+            "original_proposal": original_proposal,
+            "proposal_rejected": bool(original_proposal and norm(original_proposal) != norm(target)),
+            "evidence_at_confirmation": list(evidence_at_confirmation),
+            "source_run": source_run,
+            "decision_id": gate_id,
+            "lineage_id": gate_id,
             "gate_id": gate_id,
+        }
+        predecessor = current_item if current_item and current_item.get("status") == "SUPERSEDED" else (previous_item if supersede else None)
+        if predecessor and predecessor.get("memory_id") != memory_id:
+            item["supersedes"] = predecessor.get("memory_id")
+            predecessor["superseded_by"] = memory_id
+        self.data["entity_mappings"].append(item)
+        self.save()
+        return item
+
+    def record_rejected_proposal(self, *, decision_id: str, sources: Iterable[str], proposal: str, source_run: str | None = None) -> None:
+        self.data.setdefault("rejected_proposals", []).append({
+            "kind": "rejected_proposal",
+            "decision_id": decision_id,
+            "sources": list(sources),
+            "proposal": proposal,
+            "status": "REJECTED",
+            "created_at": now_iso(),
+            "source_run": source_run,
+            "creates_business_fact": False,
         })
         self.save()
+
+    def mark_conflicted(self, memory_id: str, *, current_hard_target: str) -> None:
+        for item in self.data["entity_mappings"]:
+            if item.get("memory_id") == memory_id and item.get("status") == "ACTIVE":
+                item["status"] = "CONFLICTED"
+                item["conflicted_at"] = now_iso()
+                item["conflict_target"] = current_hard_target
+                self.save()
+                return
 
     def add_rule(self, rule: str, *, gate_id: str) -> None:
         if rule != WORKFLOW_RULE_STALE_TEMPLATE:
@@ -551,6 +700,7 @@ def resolve_product_evidence(
     products = [item["name"] for item in template["report"]["products"]]
     product_by_key = {norm(item): item for item in products}
     exact_matches: list[tuple[str, str, dict[str, Any] | None]] = []
+    memory_items: list[dict[str, Any]] = []
     canonical = product_by_key.get(norm(source))
     if canonical:
         exact_matches.append((canonical, "exact_template_product", None))
@@ -558,9 +708,15 @@ def resolve_product_evidence(
         run_target = run_mappings.get(f"{entity_type}:{norm(source)}")
         if run_target:
             exact_matches.append((run_target, "confirmed_run_mapping", {"mapping_type": entity_type}))
-        memory_target = memory.resolve(entity_type, source)
-        if memory_target:
-            exact_matches.append((memory_target, "human_confirmed_local_mapping", {"mapping_type": entity_type}))
+        memory_item = memory.find(entity_type, source)
+        if memory_item:
+            memory_items.append(memory_item)
+            exact_matches.append((str(memory_item["target"]), "human_confirmed_local_mapping", {
+                "mapping_type": entity_type,
+                "memory_id": memory_item.get("memory_id"),
+                "lineage_id": memory_item.get("lineage_id"),
+                "memory_scope": memory_item.get("scope", {}),
+            }))
     stripped = strip_campaign_spec(source)
     canonical_stripped = product_by_key.get(norm(stripped)) if stripped else None
     if canonical_stripped:
@@ -569,9 +725,13 @@ def resolve_product_evidence(
         run_target = run_mappings.get(f"product:{norm(stripped)}")
         if run_target:
             exact_matches.append((run_target, "confirmed_run_mapping", {"mapping_type": "product", "normalized_source": stripped}))
-        memory_target = memory.resolve("product", stripped)
-        if memory_target:
-            exact_matches.append((memory_target, "human_confirmed_local_mapping", {"mapping_type": "product", "normalized_source": stripped}))
+        memory_item = memory.find("product", stripped)
+        if memory_item:
+            memory_items.append(memory_item)
+            exact_matches.append((str(memory_item["target"]), "human_confirmed_local_mapping", {
+                "mapping_type": "product", "normalized_source": stripped,
+                "memory_id": memory_item.get("memory_id"), "lineage_id": memory_item.get("lineage_id"),
+            }))
 
     sku_model = template.get("sku") or {}
     sku_map = sku_model.get("map", {})
@@ -595,7 +755,7 @@ def resolve_product_evidence(
                 for target in conflict.get("products", []):
                     exact_matches.append((target, "conflicting_template_sku", {"sku": str(value).strip()}))
 
-    return resolve_entity(
+    decision = resolve_entity(
         source,
         products,
         entity_type="product",
@@ -607,6 +767,11 @@ def resolve_product_evidence(
         cross_file_targets=cross_file_targets,
         reconciliation=reconciliation,
     )
+    memory_conflict = next((item for item in decision.get("contradictions", []) if item.get("type") == "memory_conflict"), None)
+    if memory_conflict:
+        for item in memory_items:
+            memory.mark_conflicted(str(item.get("memory_id") or ""), current_hard_target=str(memory_conflict.get("current_hard_target") or ""))
+    return decision
 
 
 def resolve_store_evidence(
@@ -627,9 +792,11 @@ def resolve_store_evidence(
     run_target = run_mappings.get(f"store:{norm(source)}")
     if run_target:
         exact_matches.append((run_target, "confirmed_run_mapping", {"mapping_type": "store"}))
-    memory_target = memory.resolve("store", source)
-    if memory_target:
-        exact_matches.append((memory_target, "human_confirmed_local_mapping", {"mapping_type": "store"}))
+    memory_item = memory.find("store", source)
+    if memory_item:
+        exact_matches.append((str(memory_item["target"]), "human_confirmed_local_mapping", {
+            "mapping_type": "store", "memory_id": memory_item.get("memory_id"), "lineage_id": memory_item.get("lineage_id"),
+        }))
     return resolve_entity(
         source,
         store_list,
@@ -694,27 +861,25 @@ def _review_evidence_summary(decision: dict[str, Any]) -> list[str]:
 
 def make_review_batch(decisions: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     items = []
-    for index, decision in enumerate(merge_inferred_decisions(decisions), 1):
+    merged_decisions = list(merge_inferred_decisions(decisions))
+    merged_decisions.sort(key=lambda item: (
+        0 if item.get("alternatives") else (1 if item.get("review_risk") == "MEDIUM_REVIEW_RISK" else 2),
+        " / ".join(str(value) for value in item.get("sources", [])),
+    ))
+    for index, decision in enumerate(merged_decisions, 1):
         sources = list(decision.get("sources") or [decision.get("source")])
         proposal = str(decision.get("candidate") or "")
         member_keys = [review_decision_key(item) for item in decision.get("member_decisions", [])] or [review_decision_key(decision)]
         stable = json.dumps([sources, proposal, member_keys], ensure_ascii=False, sort_keys=True)
         review_id = "RV-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:10]
-        evidence_types = {str(item.get("type") or "") for item in decision.get("supporting_evidence", [])}
-        global_inference = "global_constraint_unique_solution" in evidence_types
         mapping_sources = list(decision.get("mapping_sources") or sources)
-        persistence = None if global_inference else {
-            "entity_type": decision.get("entity_type"),
-            "sources": mapping_sources,
-            "target": proposal,
-        }
         resolution_candidate = {
             "entity_type": decision.get("entity_type"),
             "sources": mapping_sources,
             "target": proposal,
             "target_kind": decision.get("target_kind") or ("store" if decision.get("entity_type") == "store" else "product"),
         }
-        items.append({
+        item = {
             "number": index,
             "review_id": review_id,
             "status": "PENDING",
@@ -729,21 +894,27 @@ def make_review_batch(decisions: Iterable[dict[str, Any]]) -> dict[str, Any] | N
             "reconciliation_result": decision.get("reconciliation_result"),
             "reason": decision.get("reason"),
             "review_risk": decision.get("review_risk"),
+            "contexts": decision.get("contexts", []),
             "human_review_required": True,
             "question": f"我判断：“{'、'.join(sources)}” → “{proposal}”。是否接受？",
             "resolution_candidate": resolution_candidate,
-            "persistence_candidate": persistence,
             "member_keys": member_keys,
-        })
+        }
+        eligibility = persistence_eligibility(item)
+        item["persistence_eligibility"] = eligibility
+        item["persistence_candidate"] = eligibility if eligibility["eligible"] else None
+        items.append(item)
     if not items:
         return None
     stable = json.dumps([item["review_id"] for item in items], sort_keys=True)
-    return {
+    batch = {
         "batch_id": "RB-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:10],
         "status": "INFERRED_REVIEW",
         "instructions": "可回复“全部接受”，或按编号接受、拒绝、改为实际答案。",
         "items": items,
     }
+    batch["review_ux"] = render_review_batch(batch)
+    return batch
 
 
 def filename_date_evidence(path: Path, internal_dates: set[str]) -> tuple[set[str], str]:
@@ -1015,15 +1186,9 @@ def evaluate_dates(
         return (sorted(all_dates)[-1] if all_dates else ""), False, gates
     target_date = next(iter(all_dates))
     update_template = template_date != target_date
-    has_rule = memory.has_rule(WORKFLOW_RULE_STALE_TEMPLATE) or bool((run_mappings or {}).get(f"workflow:{WORKFLOW_RULE_STALE_TEMPLATE}"))
-    if update_template and not has_rule:
-        gates.append(make_gate(
-            "HG-02", "Only the template date differs from a single consistent business date", {"template_date": template_date, "business_date": target_date},
-            f"所有业务源均为 {target_date}，模板为 {template_date}。是否更新模板日期？",
-            candidate={"rule": WORKFLOW_RULE_STALE_TEMPLATE},
-            persistence={"rule": WORKFLOW_RULE_STALE_TEMPLATE},
-        ))
-    return target_date, update_template and has_rule, gates
+    # Shared Core rule: a single consistent business date outranks a stale
+    # template label.  This deterministic relation is not Local Memory.
+    return target_date, update_template, gates
 
 
 def build_golden_payload(
@@ -1659,6 +1824,9 @@ def build_golden_payload(
         "roi_number_format": "0.00",
     }
     review_batch = make_review_batch(review_decisions)
+    verified_records = sum(item.get("decision") == VERIFIED for item in resolutions)
+    if review_batch:
+        review_batch["review_ux"] = render_review_batch(review_batch, verified_records=verified_records)
     merged_human = merge_human_decisions(unresolved_decisions)
     audit = {
         "target_date": target_date,
@@ -1672,11 +1840,11 @@ def build_golden_payload(
         "resolutions": resolutions,
         "review_batch": review_batch,
         "resolution_summary": {
-            "verified": sum(item.get("decision") == VERIFIED for item in resolutions),
+            "verified": verified_records,
             "machine_inferred": 0,
             "inferred_review": len((review_batch or {}).get("items", [])),
             "human_required": len(merged_human),
-            "verified_count": sum(item.get("decision") == VERIFIED for item in resolutions),
+            "verified_count": verified_records,
             "inferred_review_count": len((review_batch or {}).get("items", [])),
             "human_required_count": len(merged_human),
             "open_ended_human_decisions": len(merged_human),
@@ -1807,7 +1975,7 @@ def run_report(
                 "decision": VERIFIED,
                 "evidence": [
                     {"type": "consistent_business_dates_template_only_stale", "business_date": target_date, "template_date": template_date},
-                    {"type": "human_confirmed_workflow_rule", "rule": WORKFLOW_RULE_STALE_TEMPLATE},
+                    {"type": "shared_core_deterministic_rule", "rule": WORKFLOW_RULE_STALE_TEMPLATE},
                 ],
                 "contradictions": [],
                 "alternatives": [],
@@ -1979,6 +2147,7 @@ def resolve_review_batch(
     workspace: Path,
     responses: list[dict[str, Any]] | None = None,
     *,
+    reply_text: str | None = None,
     accept_all: bool = False,
     default_persistence: str = "RUN_ONLY",
     node: str | None = None,
@@ -1995,7 +2164,12 @@ def resolve_review_batch(
         raise DailyRoiError("No pending inferred-review batch exists")
     if default_persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
         raise DailyRoiError(f"Invalid review persistence classification: {default_persistence}")
-    if accept_all:
+    if reply_text is not None:
+        try:
+            normalized = parse_review_reply(reply_text, batch)["responses"]
+        except ValueError as exc:
+            raise DailyRoiError(str(exc)) from exc
+    elif accept_all:
         normalized = [
             {"review_id": review_id, "action": "ACCEPT", "persistence": default_persistence}
             for review_id in pending
@@ -2032,7 +2206,7 @@ def resolve_review_batch(
         persistence = str(response.get("persistence") or default_persistence)
         if action not in {"ACCEPT", "CORRECT", "REJECT"}:
             raise DailyRoiError(f"Unsupported review action: {action}")
-        if persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
+        if persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY", "ELIGIBLE_ONLY"}:
             raise DailyRoiError(f"Invalid review persistence classification: {persistence}")
         resolution = dict(item.get("resolution_candidate") or {})
         entity_type = str(resolution.get("entity_type") or "")
@@ -2051,7 +2225,8 @@ def resolve_review_batch(
                 key = (entity_type, norm(source))
                 existing = memory.resolve(entity_type, source)
                 planned = planned_mappings.get(key)
-                if (existing and norm(existing) != norm(target)) or (planned and norm(planned) != norm(target)):
+                correction_supersedes = action == "CORRECT" and existing and norm(existing) != norm(target)
+                if ((existing and norm(existing) != norm(target) and not correction_supersedes) or (planned and norm(planned) != norm(target))):
                     raise DailyRoiError(f"Conflicting confirmed mapping for {source!r}")
                 planned_mappings[key] = target
 
@@ -2059,12 +2234,18 @@ def resolve_review_batch(
     metrics.setdefault("review_accept_count", 0)
     metrics.setdefault("review_reject_count", 0)
     metrics.setdefault("review_correct_count", 0)
+    metrics.setdefault("memory_candidates", sum(bool(item.get("persistence_candidate")) for item in pending.values()))
+    metrics.setdefault("durable_memory_eligible", sum(bool(item.get("persistence_candidate")) for item in pending.values()))
+    metrics.setdefault("run_only_not_persisted", 0)
+    metrics.setdefault("review_accept_persisted", 0)
+    metrics.setdefault("human_correction_persisted", 0)
+    metrics.setdefault("rejected_proposals_persisted_as_fact", 0)
     for response in normalized:
         review_id = str(response["review_id"])
         item = pending[review_id]
         action = str(response.get("action") or "").upper()
         persistence = str(response.get("persistence") or default_persistence)
-        if persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
+        if persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY", "ELIGIBLE_ONLY"}:
             raise DailyRoiError(f"Invalid review persistence classification: {persistence}")
         proposal = str(item.get("proposed_answer") or "")
         resolution = dict(item.get("resolution_candidate") or {})
@@ -2078,17 +2259,29 @@ def resolve_review_batch(
             "proposal": proposal,
             "at": now_iso(),
         }
+        durable = item.get("persistence_candidate")
+        remember_requested = persistence in {"PERSISTENT_REUSABLE", "ELIGIBLE_ONLY"}
+        persist_mapping = bool(remember_requested and durable)
+        if remember_requested and not durable:
+            metrics["run_only_not_persisted"] += 1
         if action == "ACCEPT":
             for key in item.get("member_keys", []):
                 state.setdefault("run_mappings", {})[str(key)] = "accepted"
-            durable = item.get("persistence_candidate")
-            if persistence == "PERSISTENT_REUSABLE":
-                if not durable:
-                    raise DailyRoiError("This inferred allocation is run-specific and is not eligible for durable memory")
+            if persist_mapping:
                 for source in durable.get("sources", []):
-                    memory.add_mapping(str(durable["entity_type"]), str(source), proposal, gate_id=review_id)
+                    memory.add_mapping(
+                        str(durable["entity_type"]), str(source), proposal, gate_id=review_id,
+                        memory_type=durable.get("memory_type"), scope=durable.get("scope"),
+                        confirmation_mode="REVIEW_ACCEPT", original_proposal=proposal,
+                        evidence_at_confirmation=item.get("evidence_summary", []), source_run=state.get("run_id"),
+                    )
+                metrics["review_accept_persisted"] += 1
             metrics["review_accept_count"] += 1
-            confirmation.update(final_answer=proposal, classification=persistence, rejected=False)
+            confirmation.update(
+                final_answer=proposal,
+                classification="PERSISTENT_REUSABLE" if persist_mapping else "RUN_ONLY",
+                rejected=False,
+            )
         elif action == "CORRECT":
             target = str(response.get("target") or "").strip()
             if not target:
@@ -2097,16 +2290,32 @@ def resolve_review_batch(
                 raise DailyRoiError("This review item has no structured correction target")
             for source in mapping_sources:
                 state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = target
-                if persistence == "PERSISTENT_REUSABLE":
-                    if not item.get("persistence_candidate"):
-                        raise DailyRoiError("This inferred allocation is run-specific and is not eligible for durable memory")
-                    memory.add_mapping(entity_type, source, target, gate_id=review_id)
+                if persist_mapping:
+                    memory.add_mapping(
+                        entity_type, source, target, gate_id=review_id,
+                        memory_type=durable.get("memory_type"), scope=durable.get("scope"),
+                        confirmation_mode="HUMAN_CORRECTION", original_proposal=proposal,
+                        evidence_at_confirmation=item.get("evidence_summary", []), source_run=state.get("run_id"),
+                        supersede=True,
+                    )
+            if persist_mapping:
+                metrics["human_correction_persisted"] += 1
             metrics["review_correct_count"] += 1
-            confirmation.update(final_answer=target, classification=persistence, rejected=True)
+            confirmation.update(
+                final_answer=target,
+                classification="PERSISTENT_REUSABLE" if persist_mapping else "RUN_ONLY",
+                rejected=True,
+            )
         elif action == "REJECT":
             for key in item.get("member_keys", []):
                 state.setdefault("run_mappings", {})[str(key)] = "rejected"
             metrics["review_reject_count"] += 1
+            memory.record_rejected_proposal(
+                decision_id=review_id,
+                sources=mapping_sources or item.get("sources", []),
+                proposal=proposal,
+                source_run=state.get("run_id"),
+            )
             confirmation.update(final_answer=None, classification="RUN_ONLY", rejected=True)
         else:
             raise DailyRoiError(f"Unsupported review action: {action}")

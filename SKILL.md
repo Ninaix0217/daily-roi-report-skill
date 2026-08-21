@@ -28,13 +28,13 @@ Use the deterministic runner as the accounting authority. An unknown value is in
    - `VERIFIED`: strong identity or controlled deterministic structure; execute automatically.
    - `INFERRED_REVIEW`: the runner has proposed one evidence-backed answer, but it must be explicitly accepted or corrected before writing.
    - `HUMAN_REQUIRED`: no unique reliable answer exists; ask the returned open business question.
-6. If `review_batch` is present, show the whole batch once in normal business language: source(s), proposed answer, concise evidence, alternatives/contradictions, and risk. Ask for “全部接受” or numbered accept/reject/correct responses. Never turn an `INFERRED_REVIEW` item into an open-ended question. Translate the response to one JSON batch and run:
+6. If `review_batch` is present, show `review_ux.text` as the whole batch once. It already groups independent business decisions into “建议重点确认” and “低风险建议”, pre-fills proposed answers and reasons, and ends with a copyable reply. Never turn an `INFERRED_REVIEW` item into an open-ended question. Natural replies can be applied directly:
 
    ```powershell
-   <PYTHON> <SKILL_DIR>/scripts/daily_roi.py review --workspace <WORKSPACE> --responses-json <RESPONSES_JSON> --node <NODE> --node-modules <NODE_MODULES>
+   <PYTHON> <SKILL_DIR>/scripts/daily_roi.py review --workspace <WORKSPACE> --reply "全部接受，符合长期记忆条件的映射记住" --node <NODE> --node-modules <NODE_MODULES>
    ```
 
-   To accept the complete batch with run-only scope, use `--accept-all`. Use `--persistence PERSISTENT_REUSABLE` only when every accepted item is eligible reusable knowledge; run-specific global allocations are not durable.
+   “全部接受” applies to this displayed batch only and is run-only. A reply containing “记住” invokes the persistence eligibility policy: stable scoped mappings are stored, while current-day global allocations remain run-only. `--responses-json` and `--accept-all` remain supported for structured automation.
 7. If `status` is `HUMAN_REQUIRED`, present all independent open business questions together. Include evidence, alternatives, contradictions, and durable-reuse eligibility. Then classify each answer as exactly one of:
    - `PERSISTENT_REUSABLE`: an explicit reusable fact/rule;
    - `RUN_ONLY`: valid only for this run;

@@ -25,7 +25,7 @@ _HARD_IDENTITY_TYPES = {
 _DETERMINISTIC_STRUCTURE_TYPES = {
     "exact_template_product", "exact_template_store", "exact_template_product_after_spec_normalization",
     "unique_store_product_membership", "generic_plan_to_unique_store_main_product", "current_store_product_scope",
-    "consistent_business_dates_template_only_stale",
+    "consistent_business_dates_template_only_stale", "shared_core_deterministic_rule",
 }
 _SEMANTIC_TYPES = {
     "normalized_exact_name", "product_form_root_exact", "normalized_containment", "short_semantic_stem",
@@ -35,11 +35,11 @@ _SEMANTIC_TYPES = {
 _CROSS_FILE_TYPES = {"cross_file_identity_corroboration", "current_run_evidence_only"}
 _GLOBAL_RECONCILIATION_TYPES = {
     "global_constraint_unique_solution", "current_file_amount_cents",
-    "ledger_remainder_exact_across_current_files", "reconciliation_consistent",
+    "ledger_remainder_exact_across_current_files",
 }
 _EXCLUSIVITY_TYPES = {
     "unique_candidate_in_current_template", "weaker_semantic_candidates_rejected",
-    "candidate_store_scope", "unique_exact_target",
+    "candidate_store_scope", "unique_exact_target", "evidence_supported_preference",
 }
 
 _VARIANT_SUFFIX = re.compile(r"(?:单盒|三盒|一盒|[13]盒|单|[13])$", re.I)
@@ -136,7 +136,9 @@ def semantic_evidence(source: str, candidate: str) -> list[dict[str, Any]]:
         evidence.append(_evidence("short_semantic_stem", stem=source_root))
     if source_root and candidate_root and len(source_root) == len(candidate_root):
         differences = sum(left != right for left, right in zip(source_root, candidate_root))
-        if differences == 1:
+        # A one-Han-character stem has no typo geometry: 苦→鸡 is not positive
+        # evidence.  Short stems may enter through literal containment only.
+        if differences == 1 and len(source_root) >= 2:
             evidence.append(_evidence("single_character_root_variant", source_root=source_root, candidate_root=candidate_root))
         if len(source_root) >= 2 and source_root != candidate_root and sorted(source_root) == sorted(candidate_root):
             evidence.append(_evidence("transposed_root_variant", source_root=source_root, candidate_root=candidate_root))
@@ -179,7 +181,10 @@ def _dedupe_evidence(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[str] = set()
     result = []
     for item in items:
-        marker = repr(sorted(item.items()))
+        # A durable memory hit carries the lineage of the human decision that
+        # created it.  Do not count cosmetic restatements of that lineage as
+        # independent support.
+        marker = f"lineage:{item['lineage_id']}" if item.get("lineage_id") else repr(sorted(item.items()))
         if marker not in seen:
             seen.add(marker)
             result.append(item)
@@ -229,7 +234,9 @@ def finalize_resolution(decision: dict[str, Any]) -> dict[str, Any]:
             and EXCLUSIVITY_EVIDENCE in classes
             and (DETERMINISTIC_STRUCTURE in classes or CROSS_FILE_EVIDENCE in classes or GLOBAL_RECONCILIATION in classes)
         )
-        risk = "LOW_REVIEW_RISK" if strong_combination else "MEDIUM_REVIEW_RISK"
+        # A unique global zero-difference allocation is still a real-world
+        # attribution inference and stays in the focus-review tier.
+        risk = "MEDIUM_REVIEW_RISK" if GLOBAL_RECONCILIATION in classes else ("LOW_REVIEW_RISK" if strong_combination else "MEDIUM_REVIEW_RISK")
         reason = "unique_evidence_backed_inference_requires_human_review"
     else:
         risk = "HIGH_REVIEW_RISK"
@@ -296,6 +303,16 @@ def resolve_entity(
         "alternatives": [],
         "reconciliation": reconciliation or {"status": "NOT_TESTED"},
         "candidate_generation": [],
+        "evidence_search_exhaustion": {
+            "status": "EXHAUSTED",
+            "checked": [
+                "hard_identity", "human_confirmed_local_memory", "template_structure",
+                "current_store_scope", "current_product_scope", "sibling_sources",
+                "cross_file_evidence", "product_distribution", "already_resolved_files",
+                "financial_remaining_balance", "global_reconciliation", "candidate_exclusivity",
+                "alternative_solution_search", "contradiction_search",
+            ],
+        },
     }
     if len(exact) == 1 and not contradictions:
         candidate = next(iter(exact))
@@ -313,8 +330,34 @@ def resolve_entity(
         )
         return finalize_resolution(base)
     if len(exact) > 1:
-        base["contradictions"].append(_evidence("conflicting_exact_targets", targets=sorted(exact)))
-        base["alternatives"] = sorted(exact)
+        hard_types = {
+            "exact_template_sku", "exact_template_product_identity", "exact_template_product",
+            "exact_template_store", "exact_template_product_after_spec_normalization",
+        }
+        memory_types = {"human_confirmed_local_mapping"}
+        hard_targets = {
+            target for target, items in exact.items()
+            if any(item.get("type") in hard_types for item in items)
+        }
+        memory_targets = {
+            target for target, items in exact.items()
+            if any(item.get("type") in memory_types for item in items)
+        }
+        if len(hard_targets) == 1 and memory_targets - hard_targets:
+            hard_target = next(iter(hard_targets))
+            base.update(
+                candidate=hard_target,
+                evidence=_dedupe_evidence(exact[hard_target]),
+                alternatives=sorted(memory_targets - hard_targets),
+            )
+            base["contradictions"].append(_evidence(
+                "memory_conflict",
+                current_hard_target=hard_target,
+                historical_targets=sorted(memory_targets - hard_targets),
+            ))
+        else:
+            base["contradictions"].append(_evidence("conflicting_exact_targets", targets=sorted(exact)))
+            base["alternatives"] = sorted(exact)
         return finalize_resolution(base)
 
     semantic_supplied = semantic_candidates is not None
@@ -368,8 +411,30 @@ def resolve_entity(
         for candidate, items in sorted(semantic.items())
     ]
     strong_candidates = []
+    preference: dict[str, int] = {}
     for candidate, items in semantic.items():
         types = {item["type"] for item in items}
+        # Ordinal evidence policy, not a probability.  Literal/root evidence
+        # outranks edit variants; matching the explicit product form (器/贴等)
+        # breaks a tie only when lexical evidence already exists.
+        rank = 0
+        if "normalized_exact_name" in types:
+            rank = 60
+        elif "product_form_root_exact" in types:
+            rank = 50
+        elif "unique_shared_token" in types or "cross_file_identity_corroboration" in types:
+            rank = 45
+        elif "normalized_containment" in types or "shared_distinct_token" in types:
+            rank = 40
+        elif "short_semantic_stem" in types:
+            rank = 30
+        elif "shared_semantic_anchor" in types:
+            rank = 20
+        elif "single_character_root_variant" in types or "transposed_root_variant" in types:
+            rank = 10
+        if rank and "same_product_form" in types:
+            rank += 5
+        preference[candidate] = rank
         if types & {"product_form_root_exact", "normalized_containment", "unique_shared_token", "cross_file_identity_corroboration"}:
             strong_candidates.append(candidate)
         elif (
@@ -379,13 +444,29 @@ def resolve_entity(
         ):
             strong_candidates.append(candidate)
     decision_candidates = sorted(strong_candidates) if strong_candidates else plausible
-    base["alternatives"] = decision_candidates
+    preferred = []
+    if decision_candidates:
+        best_rank = max(preference.get(item, 0) for item in decision_candidates)
+        preferred = [item for item in decision_candidates if preference.get(item, 0) == best_rank and best_rank > 0]
+    base["alternatives"] = decision_candidates if len(decision_candidates) > 1 else []
+    if len(decision_candidates) > 1 and len(preferred) == 1:
+        candidate = preferred[0]
+        rejected = sorted(set(decision_candidates) - {candidate})
+        semantic[candidate].append(_evidence(
+            "evidence_supported_preference",
+            preferred=candidate,
+            alternatives=rejected,
+            policy="positive_lexical_and_product_form_evidence",
+        ))
+        decision_candidates = [candidate]
+        base["alternatives"] = rejected
     if len(decision_candidates) != 1 or base["contradictions"]:
         return finalize_resolution(base)
 
     candidate = decision_candidates[0]
     evidence = list(semantic[candidate])
-    rejected_weak = sorted(set(plausible) - set(decision_candidates))
+    preserved_alternatives = list(base.get("alternatives") or [])
+    rejected_weak = sorted(set(plausible) - {candidate} - set(preserved_alternatives))
     if rejected_weak:
         evidence.append(_evidence("weaker_semantic_candidates_rejected", candidates=rejected_weak))
     evidence.append(_evidence("unique_candidate_in_current_template"))
@@ -424,9 +505,9 @@ def resolve_entity(
         types & {"current_store_product_scope", "sibling_alias_family", "reconciliation_consistent"}
     )
     if not base["contradictions"] and (strong_semantic or cross_file_supported or (weak_semantic and len(contextual_support) >= 2)):
-        base.update(candidate=candidate, decision=INFERRED_REVIEW, evidence=_dedupe_evidence(evidence), alternatives=[])
+        base.update(candidate=candidate, decision=INFERRED_REVIEW, evidence=_dedupe_evidence(evidence), alternatives=preserved_alternatives)
     else:
-        base.update(candidate=candidate, evidence=_dedupe_evidence(evidence), alternatives=[])
+        base.update(candidate=candidate, evidence=_dedupe_evidence(evidence), alternatives=preserved_alternatives)
     return finalize_resolution(base)
 
 
@@ -547,6 +628,14 @@ def resolve_global_store_constraints(
                 "assigned_totals_cents": assigned,
                 "current_run_assignments": allocation,
             },
+            "evidence_search_exhaustion": {
+                "status": "EXHAUSTED",
+                "checked": [
+                    "file_product_identity", "product_distribution", "template_store_compatibility",
+                    "already_resolved_store_ownership", "financial_remaining_balance",
+                    "zero_difference_allocation", "alternative_solution_search", "contradiction_search",
+                ],
+            },
         }
         decisions[fact_id] = finalize_resolution(decisions[fact_id])
     base.update(
@@ -559,14 +648,39 @@ def resolve_global_store_constraints(
 
 
 def merge_human_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    grouped: list[list[dict[str, Any]]] = []
+
+    def can_merge(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        if str(left.get("entity_type")) != str(right.get("entity_type")):
+            return False
+        if str(left.get("fact_family")) == str(right.get("fact_family")):
+            return True
+        left_types = {str(item.get("type") or "") for item in left.get("evidence", [])}
+        right_types = {str(item.get("type") or "") for item in right.get("evidence", [])}
+        if "global_constraint_unique_solution" in left_types and "global_constraint_unique_solution" in right_types:
+            left_answers = {normalize_entity(value) for value in [left.get("candidate"), *left.get("alternatives", [])] if value}
+            right_answers = {normalize_entity(value) for value in [right.get("candidate"), *right.get("alternatives", [])] if value}
+            return bool(left_answers & right_answers)
+        left_families = {alias_family(value) for value in left.get("sources", [left.get("source")]) if alias_family(value)}
+        right_families = {alias_family(value) for value in right.get("sources", [right.get("source")]) if alias_family(value)}
+        for lvalue in left_families:
+            for rvalue in right_families:
+                shorter, longer = sorted((lvalue, rvalue), key=len)
+                if lvalue == rvalue or (len(shorter) >= 2 and shorter in longer):
+                    return True
+        return False
+
     for decision in decisions:
         if decision.get("decision") != HUMAN_REQUIRED:
             continue
-        grouped[(str(decision.get("entity_type")), str(decision.get("fact_family")))].append(decision)
+        group = next((items for items in grouped if can_merge(items[0], decision)), None)
+        if group is None:
+            grouped.append([decision])
+        else:
+            group.append(decision)
 
     merged = []
-    for (_, _), items in grouped.items():
+    for items in grouped:
         first = dict(items[0])
         sources = _unique(source for item in items for source in item.get("sources", [item.get("source", "")]))
         candidates = _unique(str(item.get("candidate") or "") for item in items)
@@ -589,20 +703,51 @@ def merge_human_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str,
 
 def merge_inferred_decisions(decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Coalesce records into independent business decisions for one review batch."""
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    grouped: list[dict[str, Any]] = []
+
+    def related_sources(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        left_families = {alias_family(value) for value in left.get("sources", [left.get("source")]) if alias_family(value)}
+        right_families = {alias_family(value) for value in right.get("sources", [right.get("source")]) if alias_family(value)}
+        for lvalue in left_families:
+            for rvalue in right_families:
+                if lvalue == rvalue:
+                    return True
+                shorter, longer = sorted((lvalue, rvalue), key=len)
+                if len(shorter) >= 2 and shorter in longer:
+                    return True
+                if len(_longest_common_substring(lvalue, rvalue)) >= 2:
+                    return True
+        return False
+
     for raw in decisions:
         decision = finalize_resolution(raw)
         if decision.get("decision") != INFERRED_REVIEW:
             continue
         evidence_types = {str(item.get("type") or "") for item in decision.get("evidence", [])}
         if "global_constraint_unique_solution" in evidence_types:
-            family = "global-allocation"
+            group_key = "global-allocation"
         else:
-            family = str(decision.get("fact_family") or alias_family(decision.get("source")))
-        grouped[(str(decision.get("entity_type")), family, str(decision.get("candidate") or ""))].append(decision)
+            group_key = str(decision.get("business_decision_key") or "")
+        match = None
+        for group in grouped:
+            first = group["items"][0]
+            same_identity = (
+                str(first.get("entity_type")) == str(decision.get("entity_type"))
+                and normalize_entity(first.get("candidate")) == normalize_entity(decision.get("candidate"))
+            )
+            explicit_match = bool(group_key and group_key == group.get("group_key"))
+            both_global = group_key == "global-allocation" and group.get("group_key") == "global-allocation"
+            if same_identity and (explicit_match or both_global or related_sources(first, decision)):
+                match = group
+                break
+        if match is None:
+            grouped.append({"group_key": group_key, "items": [decision]})
+        else:
+            match["items"].append(decision)
 
     merged = []
-    for items in grouped.values():
+    for group in grouped:
+        items = group["items"]
         first = dict(items[0])
         sources = _unique(source for item in items for source in item.get("sources", [item.get("source", "")]))
         first["source"] = sources[0] if len(sources) == 1 else " / ".join(sources)
