@@ -103,7 +103,7 @@ class EvidenceClassificationTests(unittest.TestCase):
         self.assertIn("是否接受", batch["items"][0]["question"])
         self.assertNotIn("是什么", batch["items"][0]["question"])
 
-    def test_r3_two_real_candidates_remain_human_required(self):
+    def test_r3_two_supported_candidates_remain_human_required(self):
         decision = resolve_entity(
             "暖舒贴",
             ["暖适贴", "舒暖贴"],
@@ -236,9 +236,12 @@ class ReviewLifecycleTests(unittest.TestCase):
             resumed.assert_called_once()
 
 
-class SanitizedRc3ReplayTests(unittest.TestCase):
-    def test_rc3_seven_items_reclassify_to_three_three_one(self):
-        fixture = json.loads((ROOT / "evals" / "fixtures" / "review-layer" / "rc3-sanitized-replay.json").read_text(encoding="utf-8"))
+class Rc3KnownFailureArchetypeTests(unittest.TestCase):
+    def test_rc3_inspired_simulated_archetypes_reclassify_to_three_three_one(self):
+        fixture = json.loads((ROOT / "evals" / "fixtures" / "review-layer" / "rc3-known-failure-archetypes.json").read_text(encoding="utf-8"))
+        self.assertEqual(fixture["evidence_class"], "SIMULATED")
+        self.assertEqual(fixture["historical_basis"], "REAL_OBSERVED_FAILURE_SHAPE")
+        self.assertFalse(fixture["original_run_retained"])
         decisions = [
             finalize_resolution({
                 "schema_version": 1,
@@ -278,7 +281,7 @@ class SanitizedRc3ReplayTests(unittest.TestCase):
             "human_required": sum(item["decision"] == HUMAN_REQUIRED for item in decisions),
             "open_ended_human_decisions": sum(item["decision"] == HUMAN_REQUIRED for item in decisions),
         }
-        self.assertEqual(len(decisions), fixture["original_human_items"])
+        self.assertEqual(len(decisions), fixture["scenario_items"])
         self.assertEqual(counts, fixture["expected"])
 
 

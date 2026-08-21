@@ -16,12 +16,17 @@ The private Golden harness reads the locally retained original files, including 
 
 The comparison checks target date, paid cost, gross sales, brushing, real sales, every runtime multi-store reconciliation, formula map, and layout fingerprint. It is not a totals-only test.
 
+Tracked review-layer fixtures are simulated archetype scenarios. Their historical basis is limited to observed failure shapes; they are not retained external-run replays and cannot establish `REAL VERIFIED` status.
+
 ## Commands
 
 ```powershell
+python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -p "test_*.py" -v
+python scripts/validate_schemas.py
 python <LOCAL_PRIVATE_GOLDEN_HARNESS> --source <PRIVATE_GOLDEN_INPUT_DIR> --known-good <KNOWN_GOOD_XLSX> --node <NODE> --node-modules <NODE_MODULES>
 python <SKILL_CREATOR>/scripts/quick_validate.py .
+node --check scripts/workbook_worker.mjs
 ```
 
 ## Verification labels

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added Evidence Resolution v1.2 search-exhaustion audit, positive-evidence safety for short Chinese stems, supported-candidate preference, deterministic stale-template date updates, and independent business decision consolidation.
+- Added Review UX v2 with prefilled risk-ordered decisions, copyable recommended replies, natural-language batch parsing, and run-only default acceptance.
+- Added Memory Layer v2 eligibility, minimum-safe scope, typed/provenanced facts, rejected-proposal audit, hard-identity conflict handling, lifecycle transitions, and lineage deduplication.
+- Added simulated, provenance-marked failure-archetype scenarios plus runner-level pending-review write-boundary regression. These fixtures do not reproduce an original external run.
+- Added a minimal development-validation dependency manifest and full runtime-instance JSON Schema validator.
+
+## 0.1.0-rc.4 — 2026-08-20
+
 - Added evidence classes and the `VERIFIED` / `INFERRED_REVIEW` / `HUMAN_REQUIRED` decision model.
 - Added one-shot batch Review with explicit accept, reject, and correct transitions before workbook writing.
 - Upgraded accepted/corrected reusable mappings to human-confirmed Local Memory while keeping run-specific allocations local to the run.
