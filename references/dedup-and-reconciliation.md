@@ -27,7 +27,9 @@ Every automatic removal is recorded with its evidence. Conflicting or merely sim
 - A template-external zero SKU may be audited and ignored; a nonzero one is `HG-05`.
 - Missing template SKU coverage is `HG-05`.
 - `real_sales = gross_sales - explicitly supplied brushing amount`.
-- If the template's brushing input area has no business input, do not write real-sales product cells.
+- If sales are known but the template's brushing input area has no nonzero source value and the current run has no explicit Human confirmation, brushing is `UNKNOWN` and real sales are `UNRESOLVED`. Create a blocking material-input Human Gate; do not write or complete a workbook with blank/zero real-sales output.
+- Human-confirmed zero is `KNOWN_ZERO`, not missing. A supplied nonzero total is accepted only for a single-product run; multi-product nonzero brushing requires product-level allocation and remains blocked.
+- The current TemplateModel does not preserve enough provenance to prove that a zero-valued brushing cell represents complete source coverage. Source zero therefore remains fail-closed until a stronger input contract exists; existing nonzero source values retain `SOURCE` provenance.
 
 ## Money
 

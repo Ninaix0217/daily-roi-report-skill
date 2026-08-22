@@ -45,6 +45,10 @@ WORKFLOW_RULE_STALE_TEMPLATE = "auto_update_stale_template_date"
 MEMORY_TYPES = {"ENTITY_MAPPING", "PLAN_PATTERN", "STORE_MAPPING", "WORKFLOW_PREFERENCE"}
 MEMORY_STATUSES = {"ACTIVE", "SUPERSEDED", "CONFLICTED", "RETIRED"}
 SOURCE_DATE_RE = re.compile(r"(20\d{2})[-_]?([01]\d)[-_]?([0-3]\d)")
+BRUSHING_RUN_MAPPING_KEY = "material:brushing_cents"
+BRUSHING_UNKNOWN = "UNKNOWN"
+BRUSHING_KNOWN_ZERO = "KNOWN_ZERO"
+BRUSHING_KNOWN_AMOUNT = "KNOWN_AMOUNT"
 
 
 class DailyRoiError(RuntimeError):
@@ -80,6 +84,17 @@ def to_cents(value: Any) -> int:
 
 def cents_text(value: int) -> str:
     return f"{Decimal(value) / 100:.2f}"
+
+
+def nonnegative_money_cents(value: Any) -> int:
+    """Parse one explicit currency value without treating zero as absence."""
+    try:
+        amount = Decimal(str(value).replace(",", "").strip()).quantize(MONEY, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, AttributeError) as exc:
+        raise DailyRoiError(f"Invalid nonnegative monetary value: {value!r}") from exc
+    if not amount.is_finite() or amount < 0:
+        raise DailyRoiError(f"Invalid nonnegative monetary value: {value!r}")
+    return int((amount * 100).to_integral_exact())
 
 
 def sha256_file(path: Path) -> str:
@@ -1077,8 +1092,10 @@ def finalize_resolution_collection(
     verified = sum(item.get("decision") == VERIFIED for item in resolutions)
     batch = audit.get("review_batch")
     gates = list(human_gates or [])
+    review_ux = render_review_batch(batch, verified_records=verified, human_gates=gates)
+    audit["review_ux"] = review_ux
     if batch:
-        batch["review_ux"] = render_review_batch(batch, verified_records=verified, human_gates=gates)
+        batch["review_ux"] = review_ux
     summary = dict(audit.get("resolution_summary") or {})
     summary.update(
         verified=verified,
@@ -1086,6 +1103,9 @@ def finalize_resolution_collection(
         inferred_review=len((batch or {}).get("items", [])),
         inferred_review_count=len((batch or {}).get("items", [])),
         post_intra_entity_family_merge_count=(batch or {}).get("post_intra_entity_family_merge_count", 0),
+        human_required=len(gates),
+        human_required_count=len(gates),
+        open_ended_human_decisions=len(gates),
     )
     audit["resolution_summary"] = summary
     return audit
@@ -1948,6 +1968,7 @@ def build_golden_payload(
 
     sales_payload = {"write": False, "reason": "sales_or_explicit_brushing_input_absent"}
     sales_audit = None
+    material_inputs = None
     if sales and template.get("sku"):
         sku_map = template["sku"]["map"]
         by_product = {product: {"single": [], "triple": [], "other": []} for product in products}
@@ -1984,15 +2005,34 @@ def build_golden_payload(
                 "HG-04", "Sales SKU sum does not equal the sales file reported total", {"reported": cents_text(sales["reported_cents"]), "sku_sum": cents_text(source_total), "difference": cents_text(source_total - sales["reported_cents"])},
                 "销售 SKU 汇总与文件合计不一致，请确认源文件。",
             ))
-        brush_values = {item["name"]: to_cents(item.get("brush_value")) for item in template["sku"]["products"]}
-        explicit_brushing = any(value != 0 for value in brush_values.values())
-        if explicit_brushing:
-            brush_total = sum(brush_values.values())
+        source_brush_values = {item["name"]: to_cents(item.get("brush_value")) for item in template["sku"]["products"]}
+        source_has_nonzero_brushing = any(value != 0 for value in source_brush_values.values())
+        human_brushing_value = run_mappings.get(BRUSHING_RUN_MAPPING_KEY)
+        brushing_state = BRUSHING_UNKNOWN
+        brushing_provenance = None
+        resolved_brush_values: dict[str, int] | None = None
+        if human_brushing_value is not None:
+            human_brushing_cents = nonnegative_money_cents(cents_text(int(human_brushing_value)))
+            if len(products) > 1 and human_brushing_cents:
+                raise DailyRoiError("A nonzero aggregate brushing amount requires product-level allocation")
+            resolved_brush_values = {product: 0 for product in products}
+            if products:
+                resolved_brush_values[products[0]] = human_brushing_cents
+            brushing_state = BRUSHING_KNOWN_ZERO if human_brushing_cents == 0 else BRUSHING_KNOWN_AMOUNT
+            brushing_provenance = "HUMAN_CONFIRMED_ZERO" if human_brushing_cents == 0 else "HUMAN_PROVIDED"
+        elif source_has_nonzero_brushing:
+            resolved_brush_values = source_brush_values
+            brushing_state = BRUSHING_KNOWN_AMOUNT
+            brushing_provenance = "SOURCE"
+
+        if resolved_brush_values is not None:
+            brush_total = sum(resolved_brush_values.values())
             sales_products = []
             for product in products:
                 grouped = by_product[product]
                 parts = grouped["single"] + grouped["triple"] + grouped["other"]
-                sales_products.append({"product": product, "components_cents": parts, "gross_cents": sum(parts), "brush_cents": brush_values.get(product, 0), "real_cents": sum(parts) - brush_values.get(product, 0)})
+                product_brushing = resolved_brush_values.get(product, 0)
+                sales_products.append({"product": product, "components_cents": parts, "gross_cents": sum(parts), "brush_cents": product_brushing, "real_cents": sum(parts) - product_brushing})
             sales_payload = {
                 "write": True,
                 "products": sales_products,
@@ -2000,7 +2040,62 @@ def build_golden_payload(
                 "brushing_cents": brush_total,
                 "real_sales_cents": source_total - brush_total,
             }
-        sales_audit = {"reported_cents": sales["reported_cents"], "sku_sum_cents": source_total, "matched_count": len(template_skus & source_skus), "expected_template_sku_count": len(template_skus), "external_skus": sorted(source_skus - template_skus), "missing_skus": missing}
+            material_inputs = {
+                "gross_sales": {"status": "KNOWN", "amount_cents": source_total},
+                "brushing": {"status": brushing_state, "amount_cents": brush_total, "provenance": brushing_provenance},
+                "real_sales": {"status": "KNOWN", "amount_cents": source_total - brush_total},
+            }
+        else:
+            sales_payload = {"write": False, "reason": "brushing_input_unresolved"}
+            material_inputs = {
+                "gross_sales": {"status": "KNOWN", "amount_cents": source_total},
+                "brushing": {"status": BRUSHING_UNKNOWN, "amount_cents": None, "provenance": None},
+                "real_sales": {"status": "UNRESOLVED", "amount_cents": None},
+            }
+            material_resolution = {
+                "entity_type": "material_input",
+                "source": "brushing",
+                "sources": ["brushing"],
+                "target_kind": "amount",
+                "business_relation_kind": "MATERIAL_INPUT",
+                "material_input": "brushing",
+                "product_count": len(products),
+                "gross_sales_cents": source_total,
+                "useful_hint": {
+                    "evidence_status": "MATERIAL_INPUT_CONFIRM_ZERO",
+                    "candidate": "0.00",
+                    "selected_answer": None,
+                },
+            }
+            gates.append(make_gate(
+                "HG-06",
+                "Brushing input is missing, so real sales and ROI are unresolved",
+                {
+                    "material_input": "brushing",
+                    "gross_sales_status": "KNOWN",
+                    "gross_sales_cents": source_total,
+                    "brushing_status": BRUSHING_UNKNOWN,
+                    "real_sales_status": "UNRESOLVED",
+                    "resolution": material_resolution,
+                },
+                (
+                    f"销售数据已完整匹配，本日销售额为 {cents_text(source_total)}，"
+                    "但未提供刷单数据，因此真实销售额暂时无法确定。"
+                    "如确认本日无刷单请选择确认；如有刷单请提供金额或产品级刷单数据。"
+                ),
+                candidate=material_resolution,
+            ))
+        sales_audit = {
+            "reported_cents": sales["reported_cents"],
+            "sku_sum_cents": source_total,
+            "matched_count": len(template_skus & source_skus),
+            "expected_template_sku_count": len(template_skus),
+            "external_skus": sorted(source_skus - template_skus),
+            "missing_skus": missing,
+            "gross_sales_status": "KNOWN",
+            "brushing_status": brushing_state,
+            "real_sales_status": "KNOWN" if resolved_brush_values is not None else "UNRESOLVED",
+        }
 
     resolutions = union_cross_path_evidence(resolutions)
     for decision in resolutions:
@@ -2045,6 +2140,7 @@ def build_golden_payload(
         "proven_duplicates": [{"evidence": item["evidence"], "source_file": item["duplicate"]["source_file"], "row": item["duplicate"]["row"]} for item in proven],
         "suspected_duplicates": len(suspected),
         "sales": sales_audit,
+        "material_inputs": material_inputs,
         "resolutions": resolutions,
         "review_batch": review_batch,
         "resolution_summary": {
@@ -2231,9 +2327,11 @@ def run_report(
         "exact_duplicate_files": exact_duplicate_files,
         "gates": list(unique_gates.values()),
         "review_batch": review_batch,
+        "review_ux": (audit or {}).get("review_ux"),
         "review_metrics": review_metrics,
         "run_mappings": run_mappings,
         "audit": audit,
+        "material_inputs": (audit or {}).get("material_inputs"),
         "payload_path": None,
         "output_path": None,
         "verification": None,
@@ -2319,6 +2417,33 @@ def resolve_gate(
         atomic_json(paths.current_run, state)
         return state
     candidate = dict(gate.get("candidate_resolution") or {})
+    if str(candidate.get("business_relation_kind") or "") == "MATERIAL_INPUT":
+        if persistence != "RUN_ONLY":
+            raise DailyRoiError("Material input confirmations are RUN_ONLY")
+        if target is None:
+            raise DailyRoiError("Material input resolution requires an explicit amount")
+        canonical_target = validate_human_gate_target(gate, str(target), state.get("template_model") or {})
+        amount_cents = nonnegative_money_cents(canonical_target)
+        state.setdefault("run_mappings", {})[BRUSHING_RUN_MAPPING_KEY] = str(amount_cents)
+        append_jsonl(paths.confirmations, {
+            "gate_id": gate_id,
+            "decision_type": "HUMAN_CONFIRMED",
+            "classification": "RUN_ONLY",
+            "action": "CONFIRM_ZERO" if amount_cents == 0 else "PROVIDE_AMOUNT",
+            "at": now_iso(),
+            "resolution": {**candidate, "target": canonical_target, "amount_cents": amount_cents},
+        })
+        state["gates"] = [item for item in state.get("gates", []) if item.get("gate_id") != gate_id]
+        state["updated_at"] = now_iso()
+        atomic_json(paths.current_run, state)
+        return run_report(
+            workspace,
+            Path(state["input_dir"]),
+            Path(state["output_dir"]),
+            node=node,
+            node_modules=node_modules,
+            existing_state=state,
+        )
     if target:
         candidate["target"] = target
     if "entity_type" in candidate:
@@ -2356,6 +2481,7 @@ _HUMAN_GATE_TARGET_DOMAINS = {
     "PRODUCT_ASSIGNMENT": "PRODUCT",
     "STORE_ASSIGNMENT": "STORE",
     "STORE_ALLOCATION": "STORE",
+    "MATERIAL_INPUT": "AMOUNT",
 }
 
 
@@ -2394,6 +2520,15 @@ def validate_human_gate_target(gate: dict[str, Any], target: str, template_model
             str(group.get("store") or "").strip()
             for group in template_model.get("store_groups", [])
         ]
+    elif domain == "AMOUNT":
+        candidate = dict(gate.get("candidate_resolution") or {})
+        cents = nonnegative_money_cents(target)
+        if int(candidate.get("product_count") or 0) > 1 and cents:
+            raise DailyRoiError("A nonzero aggregate brushing amount requires product-level allocation")
+        gross_sales_cents = candidate.get("gross_sales_cents")
+        if gross_sales_cents is not None and cents > int(gross_sales_cents):
+            raise DailyRoiError("Brushing amount cannot exceed known gross sales")
+        return cents_text(cents)
     else:  # pragma: no cover - human_gate_target_domain is fail-closed.
         raise DailyRoiError(f"Unsupported Human Gate target domain: {domain}")
     allowed = [value for value in allowed if value]
@@ -2420,14 +2555,15 @@ def resolve_review_batch(
     state = json.loads(paths.current_run.read_text(encoding="utf-8"))
     batch = dict(state.get("review_batch") or {})
     pending = {str(item.get("review_id")): item for item in batch.get("items", []) if item.get("status") == "PENDING"}
-    if not pending:
+    pending_gate_list = list(state.get("gates") or [])
+    if not pending and not (reply_text is not None and pending_gate_list):
         raise DailyRoiError("No pending inferred-review batch exists")
     if default_persistence not in {"PERSISTENT_REUSABLE", "RUN_ONLY"}:
         raise DailyRoiError(f"Invalid review persistence classification: {default_persistence}")
     human_responses: list[dict[str, Any]] = []
     if reply_text is not None:
         try:
-            parsed_reply = parse_review_reply(reply_text, batch, human_gates=list(state.get("gates") or []))
+            parsed_reply = parse_review_reply(reply_text, batch, human_gates=pending_gate_list)
             normalized = parsed_reply["responses"]
             human_responses = list(parsed_reply.get("human_responses") or [])
         except ValueError as exc:
@@ -2506,14 +2642,17 @@ def resolve_review_batch(
         gate = pending_gates.get(gate_id)
         if not gate:
             raise DailyRoiError(f"Human Gate not found: {gate_id}")
-        if response.get("action") not in {"CONFIRM_HINT", "CORRECT"}:
-            raise DailyRoiError(f"Unsupported Human Gate response: {response.get('action')}")
+        domain = human_gate_target_domain(gate)
+        action = str(response.get("action") or "")
+        allowed_actions = {"CONFIRM_ZERO", "PROVIDE_AMOUNT"} if domain == "AMOUNT" else {"CONFIRM_HINT", "CORRECT"}
+        if action not in allowed_actions:
+            raise DailyRoiError(f"Unsupported Human Gate response: {action}")
         target = str(response.get("target") or "").strip()
         candidate = dict(gate.get("candidate_resolution") or {})
         sources = [str(value) for value in candidate.get("sources", []) if str(value or "").strip()]
         if not target or not candidate.get("entity_type") or not sources:
             raise DailyRoiError("Human Gate reply has no structured mapping target")
-        validate_human_gate_target(gate, target, state.get("template_model") or {})
+        response["target"] = validate_human_gate_target(gate, target, state.get("template_model") or {})
 
     metrics = dict(state.get("review_metrics") or {})
     metrics.setdefault("review_accept_count", 0)
@@ -2627,10 +2766,16 @@ def resolve_review_batch(
         gate = pending_gates[gate_id]
         candidate = dict(gate.get("candidate_resolution") or {})
         target = str(response["target"])
-        entity_type = str(candidate["entity_type"])
-        sources = [str(value) for value in candidate.get("sources", []) if str(value or "").strip()]
-        for source in sources:
-            state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = target
+        domain = human_gate_target_domain(gate)
+        amount_cents = None
+        if domain == "AMOUNT":
+            amount_cents = nonnegative_money_cents(target)
+            state.setdefault("run_mappings", {})[BRUSHING_RUN_MAPPING_KEY] = str(amount_cents)
+        else:
+            entity_type = str(candidate["entity_type"])
+            sources = [str(value) for value in candidate.get("sources", []) if str(value or "").strip()]
+            for source in sources:
+                state.setdefault("run_mappings", {})[f"{entity_type}:{norm(source)}"] = target
         append_jsonl(paths.confirmations, {
             "gate_id": gate_id,
             "decision_type": "HUMAN_CONFIRMED",
@@ -2638,7 +2783,11 @@ def resolve_review_batch(
             "action": response.get("action"),
             "evidence_status": response.get("evidence_status"),
             "at": now_iso(),
-            "resolution": {**candidate, "target": target},
+            "resolution": {
+                **candidate,
+                "target": target,
+                **({"amount_cents": amount_cents} if amount_cents is not None else {}),
+            },
         })
         resolved_gate_ids.add(gate_id)
 

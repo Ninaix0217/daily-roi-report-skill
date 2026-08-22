@@ -41,6 +41,7 @@ Use the deterministic runner as the accounting authority. An unknown value is in
    - `REJECTED`: not confirmed.
    An `AMOUNT_ONLY_HINT` is only a useful clue: it is not a selected answer, is not part of “全部接受”, and never enters Local Memory. If a numbered hint is shown alongside a Review Batch, wording such as “全部接受；20是” records `20是` as a separate explicit Human confirmation. A corrected store remains `RUN_ONLY` unless a separate stable reusable identity is confirmed.
    A mixed reply may also correct a numbered product Human Gate, for example `全部接受；20是；21改为正确产品`. The runner validates store selections against current TemplateModel stores and product selections against current TemplateModel products before mutating any part of the batch.
+   When gross sales are known but brushing is missing, the runner must keep real sales unresolved and block workbook output. `N是` is an explicit run-only confirmation that brushing is zero; `N改为金额` supplies a run-only amount for a single-product run. Missing is never treated as zero, and an unallocated nonzero total is never spread across multiple products.
 8. Resolve a Human Gate with:
 
    ```powershell

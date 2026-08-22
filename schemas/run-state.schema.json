@@ -14,6 +14,7 @@
     "manifest": { "type": "array" },
     "gates": { "type": "array", "items": { "$ref": "human-gate.schema.json" } },
     "review_batch": { "oneOf": [{ "$ref": "review-batch.schema.json" }, { "type": "null" }] },
+    "review_ux": { "type": ["object", "null"] },
     "review_metrics": {
       "type": "object",
       "properties": {
@@ -29,6 +30,42 @@
       }
     },
     "run_mappings": { "type": "object", "additionalProperties": { "type": "string" } },
+    "material_inputs": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["gross_sales", "brushing", "real_sales"],
+          "properties": {
+            "gross_sales": {
+              "type": "object",
+              "required": ["status", "amount_cents"],
+              "properties": {
+                "status": { "const": "KNOWN" },
+                "amount_cents": { "type": "integer", "minimum": 0 }
+              }
+            },
+            "brushing": {
+              "type": "object",
+              "required": ["status", "amount_cents", "provenance"],
+              "properties": {
+                "status": { "enum": ["UNKNOWN", "KNOWN_ZERO", "KNOWN_AMOUNT"] },
+                "amount_cents": { "type": ["integer", "null"], "minimum": 0 },
+                "provenance": { "enum": ["SOURCE", "HUMAN_CONFIRMED_ZERO", "HUMAN_PROVIDED", null] }
+              }
+            },
+            "real_sales": {
+              "type": "object",
+              "required": ["status", "amount_cents"],
+              "properties": {
+                "status": { "enum": ["KNOWN", "UNRESOLVED"] },
+                "amount_cents": { "type": ["integer", "null"] }
+              }
+            }
+          }
+        }
+      ]
+    },
     "audit": {
       "type": ["object", "null"],
       "properties": {

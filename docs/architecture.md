@@ -38,6 +38,8 @@ Codex + SKILL.md
 
 Skill source is developer-managed and replaceable. `.daily-roi/` is employee-owned and workspace-scoped. Run state is daily/audit state; it is not promoted to durable memory. Golden fixtures are test-only and excluded from distributable business knowledge.
 
+Material daily inputs use explicit run-state semantics. When gross sales are known but brushing is unknown, real sales remains unresolved and a run-only Human Gate blocks the write boundary. Human-confirmed zero and a supplied amount are distinct provenance states; neither becomes durable Memory.
+
 ## TemplateModel
 
 The worker locates report and support structures from semantic headers, formulas, and cell relationships. It records sheets, report products, dates, writable cells, SKU mappings and conflicts, product/store groups, and layout properties. Production code does not use the Golden case's observed product count, SKU count, sheet names, ranges, or stores as constants.

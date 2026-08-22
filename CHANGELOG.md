@@ -11,6 +11,7 @@
 - Added a Candidate 3 production-path metadata projection fix so existing reconciliation store scope and provenance-qualified semantic roots reach the unchanged union/consolidation guards without mutating raw evidence.
 - Added a Candidate 4 identity-provenance boundary: current-file-derived placement bindings remain reviewable evidence, while independently trusted template identity bindings retain hard-identity behavior. Same-origin repetition cannot self-promote to `VERIFIED`.
 - Added a Candidate 5 typed Human Gate validation boundary so mixed replies validate product assignments against TemplateModel products and store assignments/allocations against TemplateModel stores before applying the batch atomically.
+- Added a Candidate 6 material-input completeness boundary: known gross sales with unresolved brushing now blocks output, distinguishes explicit zero from missing, supports run-only zero/nonzero confirmation, and preserves atomic mixed Human resolution.
 
 ## 0.1.0-rc.4 — 2026-08-20
 

@@ -32,12 +32,12 @@ The implementation preserves the Baseline order as seven resumable phases.
 - Aggregate final costs by product, with auditable source components.
 - Reconcile each runtime-discovered multi-product store split to its ledger total.
 - Reconcile all product costs to the financial ledger total.
-- Reconcile sales SKU sums and template coverage; subtract only explicit brushing amounts.
+- Reconcile sales SKU sums and template coverage; subtract only source-provided nonzero brushing or an explicit run-only Human amount. Known gross sales with unknown brushing leaves real sales unresolved.
 - Any nonzero difference blocks writing.
 
 ## WRITE
 
-- Refuse to write while any inferred review or Human Gate remains unresolved.
+- Refuse to write while any inferred review, Human Gate, or material business output remains unresolved.
 - Create a new workbook from the original template.
 - Modify only cells identified from runtime structure.
 - Retain additive cost formulas, sales formulas, zero-safe ROI formulas, and formula-based totals.
@@ -49,5 +49,6 @@ The implementation preserves the Baseline order as seven resumable phases.
 
 ## COMPLETE
 
+- Enter `COMPLETE` only after every material business output is resolved and final workbook verification passes.
 - Save the audit under `.daily-roi/runs/<run-id>/`.
 - Return a concise outcome and the output path. Durable memory stays workspace-scoped; run artifacts do not become memory.

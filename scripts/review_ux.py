@@ -106,11 +106,20 @@ def render_review_batch(
                     "",
                 ])
                 gate_replies.append(f"{number}是")
+            elif hint.get("evidence_status") == "MATERIAL_INPUT_CONFIRM_ZERO":
+                lines.extend([
+                    f"   {gate.get('question')}",
+                    "",
+                    f"   如果确认本日刷单为0，回复：{number}是",
+                    f"   如果有刷单金额：{number}改为金额",
+                    "",
+                ])
+                gate_replies.append(f"{number}是")
             else:
                 lines.extend([f"   {gate.get('question')}", ""])
-    recommended = "全部接受，符合长期记忆条件的映射记住"
-    if gate_replies:
-        recommended += "；" + "；".join(gate_replies)
+    recommended_parts = ["全部接受，符合长期记忆条件的映射记住"] if items else []
+    recommended_parts.extend(gate_replies)
+    recommended = "；".join(recommended_parts) or "请按“需要你决定”逐项回复"
     lines.extend(["# Recommended Reply", "", recommended])
     if focus:
         first = focus[0]
@@ -137,7 +146,8 @@ def parse_review_reply(
     if not reply:
         raise ReviewReplyError("Review reply is empty")
     by_number = {int(item["number"]): item for item in batch.get("items", [])}
-    if not by_number:
+    gates = list(human_gates or [])
+    if not by_number and not gates:
         raise ReviewReplyError("Review batch has no items")
     remember = "记" in reply
     persistence = "ELIGIBLE_ONLY" if remember else "RUN_ONLY"
@@ -155,7 +165,7 @@ def parse_review_reply(
     first_human_number = max(by_number, default=0) + 1
     human_by_number = {
         first_human_number + offset: gate
-        for offset, gate in enumerate(human_gates or [])
+        for offset, gate in enumerate(gates)
     }
     hinted_confirmations = {
         int(match.group("number"))
@@ -177,23 +187,29 @@ def parse_review_reply(
     human_responses = []
     for number, gate in human_by_number.items():
         if number in corrections:
+            candidate = dict(gate.get("candidate_resolution") or {})
+            is_material_amount = (
+                candidate.get("business_relation_kind") == "MATERIAL_INPUT"
+                or candidate.get("target_kind") == "amount"
+            )
             human_responses.append({
                 "gate_id": gate["gate_id"],
-                "action": "CORRECT",
+                "action": "PROVIDE_AMOUNT" if is_material_amount else "CORRECT",
                 "target": corrections[number],
                 "classification": "RUN_ONLY",
             })
         elif number in hinted_confirmations:
             resolution = dict((gate.get("evidence") or {}).get("resolution") or {})
             hint = dict(resolution.get("useful_hint") or {})
-            if hint.get("evidence_status") != "AMOUNT_ONLY_HINT" or not hint.get("candidate"):
+            evidence_status = hint.get("evidence_status")
+            if evidence_status not in {"AMOUNT_ONLY_HINT", "MATERIAL_INPUT_CONFIRM_ZERO"} or hint.get("candidate") is None:
                 raise ReviewReplyError(f"Human decision {number} has no confirmable hint")
             human_responses.append({
                 "gate_id": gate["gate_id"],
-                "action": "CONFIRM_HINT",
+                "action": "CONFIRM_ZERO" if evidence_status == "MATERIAL_INPUT_CONFIRM_ZERO" else "CONFIRM_HINT",
                 "target": str(hint["candidate"]),
                 "classification": "RUN_ONLY",
-                "evidence_status": "AMOUNT_ONLY_HINT",
+                "evidence_status": evidence_status,
             })
     return {
         "responses": responses,
