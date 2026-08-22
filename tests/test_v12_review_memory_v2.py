@@ -254,7 +254,12 @@ class MemoryLayerV2Tests(unittest.TestCase):
             model = {"report": {"products": [{"name": "Current"}, {"name": "Historical"}]}, "sku": {"map": {}, "conflicts": []}}
             decision = resolve_product_evidence(
                 "Alias", model, memory, {}, identity_values={"sku": "ID-1"},
-                identity_index={"ID-1": [{"product": "Current", "identity_type": "sku", "origin": "sanitized"}]},
+                identity_index={"ID-1": [{
+                    "product": "Current",
+                    "identity_type": "sku",
+                    "origin": "template_sku_map",
+                    "binding_trust": "HARD",
+                }]},
             )
             self.assertEqual(decision["decision"], HUMAN_REQUIRED)
             self.assertEqual(memory.data["entity_mappings"][0]["status"], "CONFLICTED")

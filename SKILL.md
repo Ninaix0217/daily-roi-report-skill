@@ -25,7 +25,7 @@ Use the deterministic runner as the accounting authority. An unknown value is in
    ```
 
 5. Read `resolution_summary` and the JSON result. Treat the result as three distinct classes:
-   - `VERIFIED`: strong identity or controlled deterministic structure; execute automatically.
+   - `VERIFIED`: independently trusted identity binding or controlled deterministic structure; execute automatically. A stable identifier derived only from a current-file product label is provisional evidence, not hard identity.
    - `INFERRED_REVIEW`: the runner has proposed one evidence-backed answer, but it must be explicitly accepted or corrected before writing.
    - `HUMAN_REQUIRED`: no unique reliable answer exists; ask the returned open business question.
 6. If `review_batch` is present, show `review_ux.text` as the whole batch once. It already groups independent business decisions into “建议重点确认” and “低风险建议”, pre-fills proposed answers and reasons, and ends with a copyable reply. Never turn an `INFERRED_REVIEW` item into an open-ended question. Natural replies can be applied directly:

@@ -639,46 +639,115 @@ def record_identity_values(record: dict[str, Any]) -> dict[str, str]:
     return values
 
 
-def build_product_identity_index(template: dict[str, Any], campaigns: Iterable[dict[str, Any]] = ()) -> dict[str, list[dict[str, str]]]:
-    index: dict[str, list[dict[str, str]]] = defaultdict(list)
+HARD_IDENTITY_BINDING_ORIGINS = {
+    "template_sku_map",
+    "template_identity_map",
+    "template_identity_conflict",
+}
 
-    def register(value: Any, product: Any, identity_type: str, origin: str) -> bool:
+
+def qualify_identity_binding_as_hard(binding: dict[str, Any], source_identity_type: str) -> bool:
+    """Qualify the identifier-to-product binding, not merely the identifier type."""
+    if not str(binding.get("product") or "").strip():
+        return False
+    if str(binding.get("identity_type") or "") != str(source_identity_type or ""):
+        return False
+    origin = str(binding.get("origin") or "")
+    trust = str(binding.get("binding_trust") or ("HARD" if origin in HARD_IDENTITY_BINDING_ORIGINS else "DERIVED"))
+    return trust == "HARD" and origin in HARD_IDENTITY_BINDING_ORIGINS
+
+
+def build_product_identity_index(template: dict[str, Any], campaigns: Iterable[dict[str, Any]] = ()) -> dict[str, list[dict[str, Any]]]:
+    index: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    def register(
+        value: Any,
+        product: Any,
+        identity_type: str,
+        origin: str,
+        *,
+        binding_trust: str,
+        lineage_id: str | None = None,
+    ) -> bool:
         key = str(value or "").strip()
         target = str(product or "").strip()
         if not key or not target:
             return False
-        entry = {"product": target, "identity_type": identity_type, "origin": origin}
-        if entry not in index[key]:
+        duplicate = next((
+            item for item in index[key]
+            if item.get("product") == target
+            and item.get("identity_type") == identity_type
+            and item.get("origin") == origin
+            and item.get("binding_trust") == binding_trust
+        ), None)
+        if duplicate is None:
+            entry = {
+                "product": target,
+                "identity_type": identity_type,
+                "origin": origin,
+                "binding_trust": binding_trust,
+            }
+            if lineage_id:
+                entry["lineage_id"] = lineage_id
             index[key].append(entry)
             return True
         return False
 
     for value, mapped in ((template.get("sku") or {}).get("map") or {}).items():
-        register(value, mapped.get("product"), "sku", "template_sku_map")
+        register(value, mapped.get("product"), "sku", "template_sku_map", binding_trust="HARD")
     for identity_type, mapping in ((template.get("identity") or {}).get("map") or {}).items():
         for value, mapped in dict(mapping or {}).items():
             product = mapped.get("product") if isinstance(mapped, dict) else mapped
-            register(value, product, str(identity_type), "template_identity_map")
+            register(value, product, str(identity_type), "template_identity_map", binding_trust="HARD")
     for conflict in ((template.get("identity") or {}).get("conflicts") or []):
         for product in conflict.get("products", []):
-            register(conflict.get("value"), product, str(conflict.get("identity_type") or "unknown"), "template_identity_conflict")
+            register(
+                conflict.get("value"),
+                product,
+                str(conflict.get("identity_type") or "unknown"),
+                "template_identity_conflict",
+                binding_trust="HARD",
+            )
 
     products = {norm(item["name"]): item["name"] for item in template["report"]["products"]}
-    rows = [record for campaign in campaigns for record in campaign.get("records", [])]
+    rows = [
+        (str(campaign.get("name") or "current-file"), record)
+        for campaign in campaigns
+        for record in campaign.get("records", [])
+    ]
     changed = True
     while changed:
         changed = False
-        for record in rows:
+        for source_file, record in rows:
             identities = record_identity_values(record)
             exact_name = products.get(norm(record.get("product_name")))
-            targets = {entry["product"] for value in identities.values() for entry in index.get(value, [])}
+            # A derived current-run binding remains useful to resolve records
+            # carrying the same identifier, but it cannot recursively create
+            # more identity bindings or become independent proof of itself.
+            targets = {
+                entry["product"]
+                for identity_type, value in identities.items()
+                for entry in index.get(value, [])
+                if qualify_identity_binding_as_hard(entry, identity_type)
+            }
             if exact_name:
                 targets.add(exact_name)
             if len(targets) != 1:
                 continue
             target = next(iter(targets))
             for identity_type, value in identities.items():
-                changed = register(value, target, identity_type, "current_file_exact_identity_bridge") or changed
+                lineage_id = (
+                    f"current-file-binding:{source_file}:{identity_type}:"
+                    f"{str(value).strip()}:{norm(target)}"
+                )
+                changed = register(
+                    value,
+                    target,
+                    identity_type,
+                    "current_file_exact_identity_bridge",
+                    binding_trust="DERIVED",
+                    lineage_id=lineage_id,
+                ) or changed
     return dict(index)
 
 
@@ -690,7 +759,7 @@ def resolve_product_evidence(
     *,
     identity_value: str = "",
     identity_values: dict[str, str] | None = None,
-    identity_index: dict[str, list[dict[str, str]]] | None = None,
+    identity_index: dict[str, list[dict[str, Any]]] | None = None,
     context_products: Iterable[str] | None = None,
     semantic_products: Iterable[str] | None = None,
     source_scope: str | None = None,
@@ -740,22 +809,37 @@ def resolve_product_evidence(
     if identity_value and str(identity_value).strip() not in identities.values():
         identities["sku"] = str(identity_value).strip()
     product_identities = identity_index if identity_index is not None else build_product_identity_index(template)
+    derived_identity_matches: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for source_identity_type, value in identities.items():
         for mapped in product_identities.get(str(value).strip(), []):
             if str(mapped.get("identity_type")) != str(source_identity_type):
                 continue
-            evidence_type = "exact_template_sku" if mapped["identity_type"] == "sku" else "exact_template_product_identity"
-            exact_matches.append((mapped["product"], evidence_type, {
+            binding_details = {
                 "identity_type": source_identity_type,
                 "identity_value": str(value).strip(),
                 "registered_identity_type": mapped["identity_type"],
                 "origin": mapped["origin"],
-            }))
+                "binding_origin": mapped["origin"],
+                "binding_trust": mapped.get("binding_trust") or (
+                    "HARD" if mapped.get("origin") in HARD_IDENTITY_BINDING_ORIGINS else "DERIVED"
+                ),
+                "lineage_id": mapped.get("lineage_id"),
+                "independent_hard_binding": qualify_identity_binding_as_hard(mapped, source_identity_type),
+            }
+            if not qualify_identity_binding_as_hard(mapped, source_identity_type):
+                derived_identity_matches[str(mapped["product"])].append({
+                    "type": "current_run_derived_identity_binding",
+                    **binding_details,
+                })
+                continue
+            evidence_type = "exact_template_sku" if mapped["identity_type"] == "sku" else "exact_template_product_identity"
+            exact_matches.append((mapped["product"], evidence_type, binding_details))
         for conflict in sku_model.get("conflicts", []):
             if str(conflict.get("sku")) == str(value).strip():
                 for target in conflict.get("products", []):
                     exact_matches.append((target, "conflicting_template_sku", {"sku": str(value).strip()}))
 
+    derived_targets = list(derived_identity_matches)
     decision = resolve_entity(
         source,
         products,
@@ -765,9 +849,18 @@ def resolve_product_evidence(
         semantic_candidates=semantic_products,
         source_scope=source_scope,
         sibling_sources=sibling_sources,
-        cross_file_targets=cross_file_targets,
+        cross_file_targets=[*cross_file_targets, *derived_targets],
         reconciliation=reconciliation,
     )
+    if derived_identity_matches:
+        candidate = str(decision.get("candidate") or "")
+        relevant = (
+            derived_identity_matches.get(candidate, [])
+            if candidate
+            else [proof for proofs in derived_identity_matches.values() for proof in proofs]
+        )
+        decision["evidence"] = [*decision.get("evidence", []), *relevant]
+        decision = finalize_resolution(decision)
     memory_conflict = next((item for item in decision.get("contradictions", []) if item.get("type") == "memory_conflict"), None)
     if memory_conflict:
         for item in memory_items:

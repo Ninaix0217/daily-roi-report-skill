@@ -13,7 +13,7 @@ The workbook worker discovers at runtime:
 
 No sheet name, range, product count, SKU count, product order, or store set is a production constant.
 
-The Product Identity Resolver treats SKU, product ID, placement ID, and stable platform item ID as typed identities. An exact identity is `VERIFIED` only when the runtime identity index maps it to one template product. The index may use template columns or an exact same-row/cross-file identity bridge; semantic similarity never creates identity evidence. The same identifier assigned to different products is an explicit contradiction and requires resolution before writing.
+The Product Identity Resolver treats SKU, product ID, placement ID, and stable platform item ID as typed identifiers. An exact identifier becomes `VERIFIED` identity only when its product binding comes from an independently trusted source such as the TemplateModel identity map. A bridge derived from a current-file product label remains useful for grouping, same-run consistency, candidate generation, and review proposals, but it is `DERIVED` evidence and cannot promote itself to `HARD_IDENTITY`. Repetition of the same current-run lineage does not increase binding trust. The same trusted identifier assigned to different products is an explicit contradiction and requires resolution before writing.
 
 ## Protected write
 

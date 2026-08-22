@@ -34,7 +34,7 @@ _SEMANTIC_TYPES = {
 }
 _CROSS_FILE_TYPES = {
     "cross_file_identity_corroboration", "current_run_evidence_only",
-    "cross_path_semantic_evidence_union",
+    "cross_path_semantic_evidence_union", "current_run_derived_identity_binding",
 }
 _GLOBAL_RECONCILIATION_TYPES = {
     "global_constraint_unique_solution", "current_file_amount_cents",

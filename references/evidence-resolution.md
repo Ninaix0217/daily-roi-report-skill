@@ -21,7 +21,7 @@ No free-form probability or confidence number is an authorization to auto-resolv
 
 ## Evidence rules
 
-Strong identity evidence includes exact unique SKU, product ID, placement ID, stable platform item ID, and human-confirmed exact mappings. The source field is interpreted in its own identity namespace; a value must match the same namespace unless an exact same-row/cross-file bridge proves the namespaces refer to one product. A field label or cross-namespace value coincidence is never identity evidence. A duplicate identity assigned to different products is a contradiction and must not auto-resolve.
+Strong identity evidence includes exact unique SKU, product ID, placement ID, stable platform item ID, and human-confirmed exact mappings only when the identifier-to-product binding has independently trusted provenance. Identifier strength and binding trust are separate: a stable placement ID whose binding was derived solely from an ambiguous current-file label remains current-run derived evidence, not `HARD_IDENTITY`. Such a bridge may support grouping, candidate generation, same-run consistency, Evidence Union, or a review proposal, but same-origin repetition and circular reuse cannot upgrade it to `VERIFIED`. The source field is interpreted in its own identity namespace; a value must match the same namespace unless an independently trusted bridge proves the namespaces refer to one product. A field label or cross-namespace value coincidence is never identity evidence. A duplicate trusted identity assigned to different products is a contradiction and must not auto-resolve.
 
 Structural resolution may map generic plans such as one-box/three-box markers to a uniquely known current-store main product. The file-to-store relationship and main product must already be uniquely established.
 
@@ -48,6 +48,8 @@ When a global allocation has a unique amount-only zero-difference shape but no a
 Review risk is a fixed enum derived from those classes. A unique semantic result with structural/cross-file/reconciliation support is low or medium review risk. Conflicts or unresolved alternatives are high risk and `HUMAN_REQUIRED`. No probability score is used.
 
 Similarity alone is never identity and never authorizes deduplication.
+
+Identity audit entries distinguish `identity_type` from `binding_origin`, `binding_trust`, and evidence lineage. A `current_file_exact_identity_bridge` carries `binding_trust = DERIVED` and `independent_hard_binding = false`; a trusted template identity binding carries `binding_trust = HARD`. Resolver evidence is retained rather than rewritten, so an unseen unique token remains explainable without laundering its current-file label inference into hard proof.
 
 ## Human-question coalescing
 
