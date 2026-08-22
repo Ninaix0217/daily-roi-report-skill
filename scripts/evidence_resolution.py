@@ -771,25 +771,120 @@ def business_relation_kind(decision: dict[str, Any]) -> str:
     return f"{entity_type.upper()}_ASSIGNMENT" if entity_type else "UNKNOWN"
 
 
-def _decision_stores(decision: dict[str, Any]) -> set[str]:
-    stores = {
-        normalize_entity(context.get("store") or context.get("template_store"))
-        for context in decision.get("contexts", [])
+_HARD_STORE_CONTRADICTION_TYPES = {
+    "hard_identity_conflict",
+    "identity_namespace_conflict",
+    "conflicting_exact_targets",
+    "exact_target_outside_current_context",
+    "reconciliation_conflict",
+    "store_scope_conflict",
+}
+
+_SEMANTIC_ROOT_FIELDS = {
+    "product_form_root_exact": ("root",),
+    "normalized_containment": ("source_root",),
+    "single_character_root_variant": ("source_root",),
+    "transposed_root_variant": ("source_root",),
+}
+
+
+def _decision_store_projection(decision: dict[str, Any]) -> dict[str, Any]:
+    context_stores = {
+        normalize_entity(context.get(field))
+        for context in (decision.get("contexts") or [])
         if isinstance(context, dict)
+        for field in ("store", "template_store")
+        if normalize_entity(context.get(field))
     }
-    stores.discard("")
-    return stores
+    contradiction_types = {
+        str(item.get("type") or "")
+        for item in (decision.get("contradictions") or [])
+        if isinstance(item, dict)
+    }
+    hard_store_contradiction = bool(
+        decision.get("identity_namespace_conflict")
+        or contradiction_types & _HARD_STORE_CONTRADICTION_TYPES
+    )
+    reconciliation = decision.get("reconciliation") or {}
+    reconciliation_stores: set[str] = set()
+    reconciliation_store = normalize_entity(reconciliation.get("store"))
+    if (
+        reconciliation.get("status") == "PASS"
+        and reconciliation_store
+        and not hard_store_contradiction
+    ):
+        reconciliation_stores.add(reconciliation_store)
+    return {
+        "stores": context_stores | reconciliation_stores,
+        "sources": {
+            "CONTEXT": context_stores,
+            "RECONCILIATION_PASS": reconciliation_stores,
+        },
+        "conflicted": bool(
+            hard_store_contradiction
+            or (context_stores and reconciliation_stores and context_stores != reconciliation_stores)
+        ),
+    }
+
+
+def _decision_stores(decision: dict[str, Any]) -> set[str]:
+    return set(_decision_store_projection(decision)["stores"])
+
+
+def _semantic_root_evidence(decision: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    for item in (decision.get("evidence") or []):
+        if isinstance(item, dict):
+            yield item
+    selected = normalize_entity(decision.get("candidate"))
+    for generated in (decision.get("candidate_generation") or []):
+        if not isinstance(generated, dict) or normalize_entity(generated.get("candidate")) != selected:
+            continue
+        for item in generated.get("evidence", []):
+            if isinstance(item, dict):
+                yield item
+
+
+def _decision_root_projection(decision: dict[str, Any]) -> dict[str, Any]:
+    explicit_roots: set[str] = set()
+    explicit = normalize_entity(decision.get("semantic_root"))
+    if explicit:
+        explicit_roots.add(explicit)
+    evidence_roots: set[str] = set()
+    for item in _semantic_root_evidence(decision):
+        evidence_type = str(item.get("type") or "")
+        if evidence_type not in _SEMANTIC_TYPES:
+            continue
+        for field in _SEMANTIC_ROOT_FIELDS.get(evidence_type, ()):
+            root = normalize_entity(item.get(field))
+            if root:
+                evidence_roots.add(root)
+    alias_roots = {
+        alias_family(value)
+        for value in (decision.get("sources") or [decision.get("source")])
+        if alias_family(value)
+    }
+    if explicit_roots:
+        effective_roots = explicit_roots
+    elif evidence_roots:
+        effective_roots = evidence_roots
+    else:
+        effective_roots = alias_roots
+    return {
+        "roots": effective_roots,
+        "sources": {
+            "TOP_LEVEL_SEMANTIC_ROOT": explicit_roots,
+            "SEMANTIC_RESOLVER_EVIDENCE": evidence_roots,
+            "ALIAS_FAMILY_FALLBACK": alias_roots,
+        },
+        "conflicted": bool(
+            len(evidence_roots) > 1
+            or (explicit_roots and evidence_roots and explicit_roots != evidence_roots)
+        ),
+    }
 
 
 def _decision_roots(decision: dict[str, Any]) -> set[str]:
-    explicit = normalize_entity(decision.get("semantic_root"))
-    if explicit:
-        return {explicit}
-    return {
-        alias_family(value)
-        for value in decision.get("sources", [decision.get("source")])
-        if alias_family(value)
-    }
+    return set(_decision_root_projection(decision)["roots"])
 
 
 def _source_bridges(decision: dict[str, Any]) -> set[str]:
@@ -801,7 +896,11 @@ def _source_bridges(decision: dict[str, Any]) -> set[str]:
 def _has_identity_or_evidence_conflict(decision: dict[str, Any]) -> bool:
     if decision.get("identity_namespace_conflict"):
         return True
-    return bool(decision.get("contradictions"))
+    return bool(
+        decision.get("contradictions")
+        or _decision_store_projection(decision)["conflicted"]
+        or _decision_root_projection(decision)["conflicted"]
+    )
 
 
 def union_cross_path_evidence(decisions: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

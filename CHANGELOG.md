@@ -8,6 +8,7 @@
 - Added simulated, provenance-marked failure-archetype scenarios plus runner-level pending-review write-boundary regression. These fixtures do not reproduce an original external run.
 - Added a minimal development-validation dependency manifest and full runtime-instance JSON Schema validator.
 - Added a narrow Candidate 2 patch for guarded cross-path semantic evidence union, cross-entity product-assignment consolidation, canonical final VERIFIED counts, amount-only Human Gate hints, and per-member durable-memory preservation.
+- Added a Candidate 3 production-path metadata projection fix so existing reconciliation store scope and provenance-qualified semantic roots reach the unchanged union/consolidation guards without mutating raw evidence.
 
 ## 0.1.0-rc.4 — 2026-08-20
 
