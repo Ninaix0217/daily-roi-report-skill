@@ -20,7 +20,8 @@ The Product Identity Resolver treats SKU, product ID, placement ID, and stable p
 Writing starts only after no unresolved gates remain and reconciliation passes. The worker imports the original template, updates only cells identified by `TemplateModel`, and exports a new `.xlsx`.
 
 - Cost cells use auditable additive formulas when multiple source components exist.
-- Resolved product brushing cents are written as numeric values to the TemplateModel-discovered brushing cells; explicit zero is handled by payload presence rather than truthiness.
+- Resolved brushing business state and workbook representation remain separate. Each product write entry carries its state, provenance, and one materialization mode: `PRESERVE`, `WRITE_ZERO`, or `WRITE_AMOUNT`.
+- Independently sourced or human-provided nonzero brushing uses `WRITE_AMOUNT`. Human-confirmed zero uses `WRITE_ZERO`, preserving the explicit confirmation without relying on truthiness. A derived per-product zero with no independent product-level brushing fact uses `PRESERVE`, so an existing blank remains blank rather than being materialized as numeric zero.
 - Product real-sales formulas preserve the template's SKU formula order.
 - Product ROI is `IF(cost=0,0,real_sales/cost)`.
 - Total cost and sales use `SUM` over the discovered product region.
@@ -28,6 +29,6 @@ Writing starts only after no unresolved gates remain and reconciliation passes. 
 
 ## Deterministic verification
 
-The verifier checks expected values/formulas, error tokens, sheet names/order, product order, merged ranges, column widths, row heights, and non-writable style changes. It renders every sheet when supported and reports `RENDERED_UNREVIEWED` until a human/model actually inspects the images.
+The verifier checks expected values/formulas, brushing materialization, error tokens, sheet names/order, product order, merged ranges, column widths, row heights, and non-writable style changes. A blank represents resolved zero only when that product's payload explicitly requires `PRESERVE`; blank and zero are not globally interchangeable. It renders every sheet when supported and reports `RENDERED_UNREVIEWED` until a human/model actually inspects the images.
 
 Legacy `.xls` input is copied byte-for-byte to a short temporary path, converted non-interactively with LibreOffice to `.xlsx`, then inspected. The original file is never modified, and its source SHA-256 remains in the manifest.

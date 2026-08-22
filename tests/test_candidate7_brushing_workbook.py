@@ -21,6 +21,7 @@ GROSS_CENTS = 10000
 BRUSHING_CENTS = 1234
 REAL_CENTS = 8766
 PRODUCT = "PRODUCT_A"
+PRODUCT_B = "PRODUCT_B"
 
 
 def a1_indexes(address: str) -> tuple[int, int]:
@@ -33,7 +34,7 @@ def a1_indexes(address: str) -> tuple[int, int]:
 
 
 class Candidate7WorkbookHarness:
-    def __init__(self, root: Path, *, source_brush: str = "missing"):
+    def __init__(self, root: Path, *, source_brush: str = "missing", product_count: int = 1):
         self.workspace = root / "workspace"
         self.input_dir = root / "input"
         self.output_dir = root / "output"
@@ -47,6 +48,7 @@ class Candidate7WorkbookHarness:
                 str(ROOT / "tests" / "candidate7_workbook_fixture.mjs"),
                 str(self.input_dir),
                 source_brush,
+                str(product_count),
             ],
             cwd=ROOT,
             env=env,
@@ -96,8 +98,8 @@ class Candidate7WorkbookHarness:
                 node_modules=str(self.node_modules),
             )
 
-    def reopened_sales(self, output_path: str, model: dict) -> dict[str, object]:
-        product = next(item for item in model["sku"]["products"] if item["name"] == PRODUCT)
+    def reopened_sales(self, output_path: str, model: dict, product_name: str = PRODUCT) -> dict[str, object]:
+        product = next(item for item in model["sku"]["products"] if item["name"] == product_name)
         book = self.bridge.inspect_xlsx(Path(output_path))
         sheet = next(item for item in book["sheets"] if item["name"] == model["sku"]["sheet"])
 
@@ -130,6 +132,9 @@ class Candidate7BrushingWorkbookTests(unittest.TestCase):
         observed = {
             "payload_brush_cents": sales_entry["brush_cents"],
             "payload_real_cents": sales_entry["real_cents"],
+            "payload_brush_state": sales_entry["brush_business_state"],
+            "payload_brush_provenance": sales_entry["brush_provenance"],
+            "payload_brush_materialization": sales_entry["brush_materialization"],
             "gross_cents": round(float(reopened["gross"]) * 100),
             "brush_cents": None if reopened["brush"] is None else round(float(reopened["brush"]) * 100),
             "real_cents": round(float(reopened["real"]) * 100),
@@ -140,6 +145,9 @@ class Candidate7BrushingWorkbookTests(unittest.TestCase):
         expected = {
             "payload_brush_cents": BRUSHING_CENTS,
             "payload_real_cents": REAL_CENTS,
+            "payload_brush_state": "KNOWN_AMOUNT",
+            "payload_brush_provenance": "HUMAN_PROVIDED",
+            "payload_brush_materialization": "WRITE_AMOUNT",
             "gross_cents": GROSS_CENTS,
             "brush_cents": BRUSHING_CENTS,
             "real_cents": REAL_CENTS,
@@ -155,9 +163,18 @@ class Candidate7BrushingWorkbookTests(unittest.TestCase):
             harness = Candidate7WorkbookHarness(Path(temp_root))
             pending = harness.run()
             completed = harness.resolve("1是")
+            payload = json.loads(Path(completed["payload_path"]).read_text(encoding="utf-8"))
             reopened = harness.reopened_sales(completed["output_path"], completed["template_model"])
 
         self.assertEqual(completed["run_id"], pending["run_id"])
+        self.assertEqual(completed["material_inputs"]["brushing"], {
+            "status": "KNOWN_ZERO",
+            "amount_cents": 0,
+            "provenance": "HUMAN_CONFIRMED_ZERO",
+        })
+        self.assertEqual(payload["sales"]["products"][0]["brush_business_state"], "KNOWN_ZERO")
+        self.assertEqual(payload["sales"]["products"][0]["brush_provenance"], "HUMAN_CONFIRMED_ZERO")
+        self.assertEqual(payload["sales"]["products"][0]["brush_materialization"], "WRITE_ZERO")
         self.assertEqual(round(float(reopened["brush"]) * 100), 0)
         self.assertEqual(round(float(reopened["real"]) * 100), GROSS_CENTS)
         self.assertEqual(completed["verification"]["status"], "PASS")
@@ -168,6 +185,7 @@ class Candidate7BrushingWorkbookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_root:
             harness = Candidate7WorkbookHarness(Path(temp_root), source_brush="5.00")
             completed = harness.run()
+            payload = json.loads(Path(completed["payload_path"]).read_text(encoding="utf-8"))
             reopened = harness.reopened_sales(completed["output_path"], completed["template_model"])
 
         self.assertEqual(completed["material_inputs"]["brushing"], {
@@ -176,8 +194,53 @@ class Candidate7BrushingWorkbookTests(unittest.TestCase):
             "provenance": "SOURCE",
         })
         self.assertEqual(round(float(reopened["brush"]) * 100), 500)
+        self.assertEqual(payload["sales"]["products"][0]["brush_business_state"], "KNOWN_AMOUNT")
+        self.assertEqual(payload["sales"]["products"][0]["brush_provenance"], "SOURCE")
+        self.assertEqual(payload["sales"]["products"][0]["brush_materialization"], "WRITE_AMOUNT")
         self.assertEqual(round(float(reopened["real"]) * 100), GROSS_CENTS - 500)
         self.assertEqual(completed["verification"]["status"], "PASS")
+        self.assertEqual(completed["status"], "COMPLETE")
+        self.assertEqual(harness.write_count, 1)
+
+    def test_source_nonzero_preserves_implicit_zero_product_blank(self):
+        with tempfile.TemporaryDirectory() as temp_root:
+            harness = Candidate7WorkbookHarness(Path(temp_root), source_brush="12.34", product_count=2)
+            completed = harness.run()
+            payload = json.loads(Path(completed["payload_path"]).read_text(encoding="utf-8"))
+            entries = {item["product"]: item for item in payload["sales"]["products"]}
+            reopened_a = harness.reopened_sales(completed["output_path"], completed["template_model"], PRODUCT)
+            reopened_b = harness.reopened_sales(completed["output_path"], completed["template_model"], PRODUCT_B)
+
+            strict_payload = json.loads(json.dumps(payload))
+            strict_b = next(item for item in strict_payload["sales"]["products"] if item["product"] == PRODUCT_B)
+            strict_b.update({
+                "brush_business_state": "KNOWN_ZERO",
+                "brush_provenance": "HUMAN_CONFIRMED_ZERO",
+                "brush_materialization": "WRITE_ZERO",
+            })
+            strict_payload_path = Path(temp_root) / "strict-write-zero-payload.json"
+            strict_payload_path.write_text(json.dumps(strict_payload), encoding="utf-8")
+            strict_verification = harness.bridge.call(
+                "verify",
+                Path(completed["classification"]["template"]),
+                Path(completed["output_path"]),
+                strict_payload_path,
+                "",
+            )
+
+        self.assertEqual(round(float(reopened_a["brush"]) * 100), BRUSHING_CENTS)
+        self.assertIsNone(reopened_b["brush"])
+        self.assertEqual(entries[PRODUCT]["brush_business_state"], "KNOWN_AMOUNT")
+        self.assertEqual(entries[PRODUCT]["brush_provenance"], "SOURCE")
+        self.assertEqual(entries[PRODUCT]["brush_materialization"], "WRITE_AMOUNT")
+        self.assertEqual(entries[PRODUCT_B]["brush_business_state"], "KNOWN_ZERO")
+        self.assertEqual(entries[PRODUCT_B]["brush_provenance"], "DERIVED_NO_EXPLICIT_PRODUCT_FACT")
+        self.assertEqual(entries[PRODUCT_B]["brush_materialization"], "PRESERVE")
+        self.assertEqual(round(float(reopened_a["real"]) * 100), 5000 - BRUSHING_CENTS)
+        self.assertEqual(round(float(reopened_b["real"]) * 100), 5000)
+        self.assertEqual(completed["verification"]["status"], "PASS")
+        self.assertEqual(strict_verification["status"], "FAIL")
+        self.assertIn(f"brush_representation:{PRODUCT_B}:missing", strict_verification["failures"])
         self.assertEqual(completed["status"], "COMPLETE")
         self.assertEqual(harness.write_count, 1)
 

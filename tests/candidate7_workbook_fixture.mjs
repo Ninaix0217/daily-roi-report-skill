@@ -13,13 +13,19 @@ async function loadArtifactTool() {
 
 const { SpreadsheetFile, Workbook } = await loadArtifactTool();
 
-const [outputDir, sourceBrushText = "missing"] = process.argv.slice(2);
+const [outputDir, sourceBrushText = "missing", productCountText = "1"] = process.argv.slice(2);
 if (!outputDir) throw new Error("output directory is required");
 
 const targetDate = "2026-08-18";
-const product = "PRODUCT_A";
 const store = "STORE_A";
-const sku = "100001";
+const productCount = Number.parseInt(productCountText, 10);
+if (!Number.isInteger(productCount) || productCount < 1 || productCount > 2) {
+  throw new Error("product count must be 1 or 2");
+}
+const products = [
+  { name: "PRODUCT_A", sku: "100001" },
+  { name: "PRODUCT_B", sku: "100002" },
+].slice(0, productCount);
 
 async function save(workbook, fileName) {
   await (await SpreadsheetFile.exportXlsx(workbook)).save(path.join(outputDir, fileName));
@@ -30,19 +36,30 @@ await fs.mkdir(outputDir, { recursive: true });
 const template = Workbook.create();
 const report = template.worksheets.add("REPORT");
 report.getRange("A1").values = [[targetDate]];
-report.getRange("A3:E5").values = [
+report.getRange(`A3:E${4 + products.length}`).values = [
   ["产品", null, "付费总费用", "真实销售额", "综合投产比"],
-  [product, null, null, null, null],
+  ...products.map(({ name }) => [name, null, null, null, null]),
   ["合计", null, null, null, null],
 ];
 const skuSheet = template.worksheets.add("SKU");
-skuSheet.getRange("A1:H2").values = [
+skuSheet.getRange(`A1:H${1 + products.length}`).values = [
   ["商品名称", "单盒SKU", "三盒SKU", null, null, "销售总计", "刷单金额", "真实销售额"],
-  [product, sku, null, null, null, null, sourceBrushText === "missing" ? null : Number(sourceBrushText), null],
+  ...products.map(({ name, sku }, index) => [
+    name,
+    sku,
+    null,
+    null,
+    null,
+    null,
+    index === 0 && sourceBrushText !== "missing" ? Number(sourceBrushText) : null,
+    null,
+  ]),
 ];
-skuSheet.getRange("H2").formulas = [["=ROUND(F2-G2,2)"]];
+for (let row = 2; row < 2 + products.length; row += 1) {
+  skuSheet.getRange(`H${row}`).formulas = [[`=ROUND(F${row}-G${row},2)`]];
+}
 const stores = template.worksheets.add("STORES");
-stores.getRange("A1:B1").values = [[store, product]];
+stores.getRange(`A1:B${products.length}`).values = products.map(({ name }, index) => [index === 0 ? store : null, name]);
 await save(template, "template.xlsx");
 
 const finance = Workbook.create();
@@ -55,9 +72,10 @@ await save(finance, "finance.xlsx");
 
 const sales = Workbook.create();
 const salesSheet = sales.worksheets.add("SALES");
-salesSheet.getRange("A1:C3").values = [
+const perProductSales = 100 / products.length;
+salesSheet.getRange(`A1:C${2 + products.length}`).values = [
   ["日期", "SKU", "成交金额"],
   [targetDate, "合计", 100],
-  [targetDate, sku, 100],
+  ...products.map(({ sku }) => [targetDate, sku, perProductSales]),
 ];
 await save(sales, "sales.xlsx");

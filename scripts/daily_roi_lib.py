@@ -49,6 +49,10 @@ BRUSHING_RUN_MAPPING_KEY = "material:brushing_cents"
 BRUSHING_UNKNOWN = "UNKNOWN"
 BRUSHING_KNOWN_ZERO = "KNOWN_ZERO"
 BRUSHING_KNOWN_AMOUNT = "KNOWN_AMOUNT"
+BRUSH_MATERIALIZATION_PRESERVE = "PRESERVE"
+BRUSH_MATERIALIZATION_WRITE_ZERO = "WRITE_ZERO"
+BRUSH_MATERIALIZATION_WRITE_AMOUNT = "WRITE_AMOUNT"
+BRUSH_PROVENANCE_DERIVED_ZERO = "DERIVED_NO_EXPLICIT_PRODUCT_FACT"
 
 
 class DailyRoiError(RuntimeError):
@@ -76,6 +80,39 @@ def decimal_money(value: Any) -> Decimal:
         return Decimal(str(value).replace(",", "").strip()).quantize(MONEY, rounding=ROUND_HALF_UP)
     except (InvalidOperation, AttributeError) as exc:
         raise DailyRoiError(f"Invalid monetary value: {value!r}") from exc
+
+
+def product_brushing_materialization(amount_cents: int, run_provenance: str) -> dict[str, str]:
+    """Project a resolved brushing fact into an explicit workbook-write contract."""
+    if run_provenance == "HUMAN_CONFIRMED_ZERO":
+        if amount_cents != 0:
+            raise DailyRoiError("Human-confirmed zero brushing cannot carry a nonzero amount")
+        return {
+            "brush_business_state": BRUSHING_KNOWN_ZERO,
+            "brush_provenance": "HUMAN_CONFIRMED_ZERO",
+            "brush_materialization": BRUSH_MATERIALIZATION_WRITE_ZERO,
+        }
+    if run_provenance == "HUMAN_PROVIDED":
+        if amount_cents == 0:
+            raise DailyRoiError("Human-provided nonzero brushing cannot carry a zero amount")
+        return {
+            "brush_business_state": BRUSHING_KNOWN_AMOUNT,
+            "brush_provenance": "HUMAN_PROVIDED",
+            "brush_materialization": BRUSH_MATERIALIZATION_WRITE_AMOUNT,
+        }
+    if run_provenance == "SOURCE":
+        if amount_cents != 0:
+            return {
+                "brush_business_state": BRUSHING_KNOWN_AMOUNT,
+                "brush_provenance": "SOURCE",
+                "brush_materialization": BRUSH_MATERIALIZATION_WRITE_AMOUNT,
+            }
+        return {
+            "brush_business_state": BRUSHING_KNOWN_ZERO,
+            "brush_provenance": BRUSH_PROVENANCE_DERIVED_ZERO,
+            "brush_materialization": BRUSH_MATERIALIZATION_PRESERVE,
+        }
+    raise DailyRoiError(f"Unsupported resolved brushing provenance: {run_provenance!r}")
 
 
 def to_cents(value: Any) -> int:
@@ -2032,7 +2069,14 @@ def build_golden_payload(
                 grouped = by_product[product]
                 parts = grouped["single"] + grouped["triple"] + grouped["other"]
                 product_brushing = resolved_brush_values.get(product, 0)
-                sales_products.append({"product": product, "components_cents": parts, "gross_cents": sum(parts), "brush_cents": product_brushing, "real_cents": sum(parts) - product_brushing})
+                sales_products.append({
+                    "product": product,
+                    "components_cents": parts,
+                    "gross_cents": sum(parts),
+                    "brush_cents": product_brushing,
+                    "real_cents": sum(parts) - product_brushing,
+                    **product_brushing_materialization(product_brushing, brushing_provenance),
+                })
             sales_payload = {
                 "write": True,
                 "products": sales_products,

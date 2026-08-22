@@ -340,6 +340,37 @@ function money(cents) {
   return `${sign}${Math.floor(n / 100)}.${String(n % 100).padStart(2, "0")}`;
 }
 
+function brushMaterialization(entry) {
+  if (!Object.prototype.hasOwnProperty.call(entry, "brush_cents") || entry.brush_cents === null) {
+    throw new Error(`Sales payload has no brushing amount for product: ${entry.product}`);
+  }
+  const amount = Number(entry.brush_cents);
+  if (!Number.isSafeInteger(amount)) throw new Error(`Invalid brushing cents for product: ${entry.product}`);
+  const mode = entry.brush_materialization;
+  const state = entry.brush_business_state;
+  const provenance = entry.brush_provenance;
+  if (mode === "PRESERVE") {
+    if (amount !== 0 || state !== "KNOWN_ZERO" || provenance !== "DERIVED_NO_EXPLICIT_PRODUCT_FACT") {
+      throw new Error(`Invalid preserved brushing contract for product: ${entry.product}`);
+    }
+  } else if (mode === "WRITE_ZERO") {
+    if (amount !== 0 || state !== "KNOWN_ZERO" || provenance !== "HUMAN_CONFIRMED_ZERO") {
+      throw new Error(`Invalid explicit-zero brushing contract for product: ${entry.product}`);
+    }
+  } else if (mode === "WRITE_AMOUNT") {
+    if (amount === 0 || state !== "KNOWN_AMOUNT" || !["SOURCE", "HUMAN_PROVIDED"].includes(provenance)) {
+      throw new Error(`Invalid nonzero brushing contract for product: ${entry.product}`);
+    }
+  } else {
+    throw new Error(`Unknown brushing materialization for product: ${entry.product}`);
+  }
+  return mode;
+}
+
+function hasWorkbookValue(value) {
+  return value !== null && value !== undefined && value !== "";
+}
+
 function sumFormula(cells) {
   return `=SUM(${cells[0]}:${cells[cells.length - 1]})`;
 }
@@ -371,12 +402,12 @@ async function writeWorkbook(templatePath, payloadPath, outputPath) {
       if (!target?.gross_cell || !target?.real_cell || !target?.brush_cell) {
         throw new Error(`Incomplete sales target for product: ${entry.product}`);
       }
-      if (!Object.prototype.hasOwnProperty.call(entry, "brush_cents") || entry.brush_cents === null) {
-        throw new Error(`Sales payload has no brushing amount for product: ${entry.product}`);
-      }
+      const brushMode = brushMaterialization(entry);
       const parts = entry.components_cents.length ? entry.components_cents.map(money) : ["0.00"];
       skuSheet.getRange(target.gross_cell).formulas = [[`=ROUND(${parts.join("+")},2)`]];
-      skuSheet.getRange(target.brush_cell).values = [[Number(money(entry.brush_cents))]];
+      if (brushMode !== "PRESERVE") {
+        skuSheet.getRange(target.brush_cell).values = [[Number(money(entry.brush_cents))]];
+      }
       skuSheet.getRange(target.real_cell).formulas = [[`=ROUND(${target.gross_cell}-${target.brush_cell},2)`]];
       const reportTarget = products.get(entry.product);
       if (!reportTarget) throw new Error(`Sales product absent from report: ${entry.product}`);
@@ -430,6 +461,31 @@ async function verifyWorkbook(templatePath, outputPath, payloadPath, renderDir) 
   if (actualExpense !== expectedExpense) failures.push(`expense_total:${actualExpense}!=${expectedExpense}`);
   let actualRealSales = null;
   if (payload.sales?.write) {
+    const beforeSkuProducts = new Map((before.sku?.products ?? []).map((item) => [item.name, item]));
+    const afterSkuProducts = new Map((after.sku?.products ?? []).map((item) => [item.name, item]));
+    for (const entry of payload.sales.products) {
+      const mode = brushMaterialization(entry);
+      const beforeProduct = beforeSkuProducts.get(entry.product);
+      const afterProduct = afterSkuProducts.get(entry.product);
+      if (!beforeProduct || !afterProduct) {
+        failures.push(`brushing_product_missing:${entry.product}`);
+        continue;
+      }
+      const beforeValue = beforeProduct.brush_value;
+      const afterValue = afterProduct.brush_value;
+      if (mode === "PRESERVE") {
+        if (JSON.stringify(afterValue) !== JSON.stringify(beforeValue)) {
+          failures.push(`brush_representation:${entry.product}:not_preserved`);
+        }
+      } else if (!hasWorkbookValue(afterValue)) {
+        failures.push(`brush_representation:${entry.product}:missing`);
+      } else {
+        const actualBrush = cents(afterValue);
+        if (actualBrush !== entry.brush_cents) {
+          failures.push(`brush_amount:${entry.product}:${actualBrush}!=${entry.brush_cents}`);
+        }
+      }
+    }
     const expectedReal = payload.sales.real_sales_cents;
     actualRealSales = cents(report.getRange(after.report.total_sales_cell).values[0][0]);
     if (actualRealSales !== expectedReal) failures.push(`real_sales_total:${actualRealSales}!=${expectedReal}`);
