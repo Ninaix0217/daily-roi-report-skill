@@ -10,6 +10,7 @@
 - Added a narrow Candidate 2 patch for guarded cross-path semantic evidence union, cross-entity product-assignment consolidation, canonical final VERIFIED counts, amount-only Human Gate hints, and per-member durable-memory preservation.
 - Added a Candidate 3 production-path metadata projection fix so existing reconciliation store scope and provenance-qualified semantic roots reach the unchanged union/consolidation guards without mutating raw evidence.
 - Added a Candidate 4 identity-provenance boundary: current-file-derived placement bindings remain reviewable evidence, while independently trusted template identity bindings retain hard-identity behavior. Same-origin repetition cannot self-promote to `VERIFIED`.
+- Added a Candidate 5 typed Human Gate validation boundary so mixed replies validate product assignments against TemplateModel products and store assignments/allocations against TemplateModel stores before applying the batch atomically.
 
 ## 0.1.0-rc.4 — 2026-08-20
 

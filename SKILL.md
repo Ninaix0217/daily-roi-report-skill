@@ -40,6 +40,7 @@ Use the deterministic runner as the accounting authority. An unknown value is in
    - `RUN_ONLY`: valid only for this run;
    - `REJECTED`: not confirmed.
    An `AMOUNT_ONLY_HINT` is only a useful clue: it is not a selected answer, is not part of “全部接受”, and never enters Local Memory. If a numbered hint is shown alongside a Review Batch, wording such as “全部接受；20是” records `20是` as a separate explicit Human confirmation. A corrected store remains `RUN_ONLY` unless a separate stable reusable identity is confirmed.
+   A mixed reply may also correct a numbered product Human Gate, for example `全部接受；20是；21改为正确产品`. The runner validates store selections against current TemplateModel stores and product selections against current TemplateModel products before mutating any part of the batch.
 8. Resolve a Human Gate with:
 
    ```powershell

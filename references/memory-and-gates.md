@@ -33,6 +33,8 @@ Each gate stores an ID, type, blocking reason, evidence, alternatives/contradict
 
 All pending Review items must be answered before one resume. Missing answers never imply acceptance. The natural reply parser accepts “全部接受”, remember-eligible variants, numbered corrections, and mixed accept/correct wording, but always binds the response to the current displayed batch.
 
+When one reply also resolves numbered Human Gates, every requested target is validated before any confirmation or mapping is written. Validation follows the decision's target domain rather than its source identity: `PRODUCT_ASSIGNMENT` targets must exist in `TemplateModel.report.products`, while `STORE_ASSIGNMENT` and `STORE_ALLOCATION` targets must exist in `TemplateModel.store_groups`. Placement IDs, campaigns, and filenames may be sources of a product assignment; they do not create a separate target namespace. Unknown target domains fail closed, and product/store names are never validated through a combined global label set.
+
 “全部接受” is run-only by default. Wording such as “能记的记住” requests an eligibility check rather than unconditional persistence. Stable mappings with a safely inferred scope may persist; amount-dependent/current-file allocation does not. A bare rejection creates rejected-proposal audit provenance, not a new mapping fact.
 
 The CLI response file is deliberately small and structured:

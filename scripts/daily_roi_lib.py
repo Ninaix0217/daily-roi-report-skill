@@ -24,6 +24,7 @@ from evidence_resolution import (
     INFERRED_REVIEW,
     VERIFIED,
     alias_family,
+    business_relation_kind,
     finalize_resolution,
     merge_human_decisions,
     merge_inferred_decisions,
@@ -906,12 +907,16 @@ def resolution_gate(decision: dict[str, Any], gate_type: str, *, context: dict[s
     mapping_sources = list(decision.get("mapping_sources") or sources)
     label = " / ".join(str(item) for item in sources if item)
     entity_type = str(decision.get("entity_type") or "product")
-    target_label = "模板店铺" if entity_type == "store" or decision.get("target_kind") == "store" else "模板产品"
+    relation_kind = business_relation_kind(decision)
+    target_kind = str(decision.get("target_kind") or ("store" if relation_kind in {"STORE_ASSIGNMENT", "STORE_ALLOCATION"} else "product"))
+    target_label = "模板店铺" if target_kind == "store" else "模板产品"
     candidate = {
         "entity_type": entity_type,
         "source": mapping_sources[0] if mapping_sources else decision.get("source"),
         "sources": mapping_sources,
         "target": decision.get("candidate"),
+        "target_kind": target_kind,
+        "business_relation_kind": relation_kind,
     }
     evidence = {"resolution": decision, **(context or {})}
     hint = dict(decision.get("useful_hint") or {})
@@ -2347,6 +2352,57 @@ def resolve_gate(
     )
 
 
+_HUMAN_GATE_TARGET_DOMAINS = {
+    "PRODUCT_ASSIGNMENT": "PRODUCT",
+    "STORE_ASSIGNMENT": "STORE",
+    "STORE_ALLOCATION": "STORE",
+}
+
+
+def human_gate_target_domain(gate: dict[str, Any]) -> str:
+    """Return the selected business target namespace, independent of source identity type."""
+    candidate = dict(gate.get("candidate_resolution") or {})
+    resolution = dict((gate.get("evidence") or {}).get("resolution") or {})
+    relation = str(
+        candidate.get("business_relation_kind")
+        or resolution.get("business_relation_kind")
+        or (business_relation_kind(resolution) if resolution else "")
+    ).strip()
+    if relation:
+        domain = _HUMAN_GATE_TARGET_DOMAINS.get(relation)
+        if not domain:
+            raise DailyRoiError(f"Unsupported Human Gate target domain for business relation: {relation}")
+        return domain
+
+    target_kind = str(candidate.get("target_kind") or resolution.get("target_kind") or "").strip().lower()
+    if target_kind == "product":
+        return "PRODUCT"
+    if target_kind == "store":
+        return "STORE"
+    raise DailyRoiError("Human Gate target domain is missing or unsupported")
+
+
+def validate_human_gate_target(gate: dict[str, Any], target: str, template_model: dict[str, Any]) -> str:
+    domain = human_gate_target_domain(gate)
+    if domain == "PRODUCT":
+        allowed = [
+            str(product.get("name") or "").strip()
+            for product in (template_model.get("report") or {}).get("products", [])
+        ]
+    elif domain == "STORE":
+        allowed = [
+            str(group.get("store") or "").strip()
+            for group in template_model.get("store_groups", [])
+        ]
+    else:  # pragma: no cover - human_gate_target_domain is fail-closed.
+        raise DailyRoiError(f"Unsupported Human Gate target domain: {domain}")
+    allowed = [value for value in allowed if value]
+    canonical = {norm(value): value for value in allowed}.get(norm(target))
+    if not canonical:
+        raise DailyRoiError(f"Human Gate {domain} target is not present in the current TemplateModel: {target}")
+    return canonical
+
+
 def resolve_review_batch(
     workspace: Path,
     responses: list[dict[str, Any]] | None = None,
@@ -2457,9 +2513,7 @@ def resolve_review_batch(
         sources = [str(value) for value in candidate.get("sources", []) if str(value or "").strip()]
         if not target or not candidate.get("entity_type") or not sources:
             raise DailyRoiError("Human Gate reply has no structured mapping target")
-        allowed_stores = [str(group.get("store") or "") for group in (state.get("template_model") or {}).get("store_groups", [])]
-        if allowed_stores and norm(target) not in {norm(value) for value in allowed_stores}:
-            raise DailyRoiError(f"Human Gate target is not present in the current TemplateModel: {target}")
+        validate_human_gate_target(gate, target, state.get("template_model") or {})
 
     metrics = dict(state.get("review_metrics") or {})
     metrics.setdefault("review_accept_count", 0)

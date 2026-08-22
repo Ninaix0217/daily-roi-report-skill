@@ -286,6 +286,7 @@ class GlobalAllocationHintTests(unittest.TestCase):
                 sources=["FILE_A", "FILE_B"],
                 mapping_sources=["full_store_export"],
                 target_kind="store",
+                business_relation_kind="STORE_ALLOCATION",
                 useful_hint={
                     "evidence_status": "AMOUNT_ONLY_HINT",
                     "candidate": "STORE_F",
