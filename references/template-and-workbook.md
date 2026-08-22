@@ -20,6 +20,7 @@ The Product Identity Resolver treats SKU, product ID, placement ID, and stable p
 Writing starts only after no unresolved gates remain and reconciliation passes. The worker imports the original template, updates only cells identified by `TemplateModel`, and exports a new `.xlsx`.
 
 - Cost cells use auditable additive formulas when multiple source components exist.
+- Resolved product brushing cents are written as numeric values to the TemplateModel-discovered brushing cells; explicit zero is handled by payload presence rather than truthiness.
 - Product real-sales formulas preserve the template's SKU formula order.
 - Product ROI is `IF(cost=0,0,real_sales/cost)`.
 - Total cost and sales use `SUM` over the discovered product region.

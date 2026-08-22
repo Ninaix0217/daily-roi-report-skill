@@ -371,8 +371,12 @@ async function writeWorkbook(templatePath, payloadPath, outputPath) {
       if (!target?.gross_cell || !target?.real_cell || !target?.brush_cell) {
         throw new Error(`Incomplete sales target for product: ${entry.product}`);
       }
+      if (!Object.prototype.hasOwnProperty.call(entry, "brush_cents") || entry.brush_cents === null) {
+        throw new Error(`Sales payload has no brushing amount for product: ${entry.product}`);
+      }
       const parts = entry.components_cents.length ? entry.components_cents.map(money) : ["0.00"];
       skuSheet.getRange(target.gross_cell).formulas = [[`=ROUND(${parts.join("+")},2)`]];
+      skuSheet.getRange(target.brush_cell).values = [[Number(money(entry.brush_cents))]];
       skuSheet.getRange(target.real_cell).formulas = [[`=ROUND(${target.gross_cell}-${target.brush_cell},2)`]];
       const reportTarget = products.get(entry.product);
       if (!reportTarget) throw new Error(`Sales product absent from report: ${entry.product}`);
